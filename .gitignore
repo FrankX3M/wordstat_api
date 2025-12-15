@@ -17,6 +17,7 @@ __pycache__/
 *.log
 *.tmp
 *.json
+arhive/
 # OS файлы
 .DS_Store
 Thumbs.db
