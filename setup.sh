@@ -307,6 +307,316 @@ v3.0 - Полная версия с улучшенной архитектуро�
 EOF
 
 # ============================================================================
+# handlers/auth.py
+# ============================================================================
+cat > $PROJECT_NAME/handlers/auth.py <<'EOF'
+
+from aiogram import Router, F
+from aiogram.types import Message
+from aiogram.filters import Command
+
+from services.api import YandexWebmasterAPI
+from utils.logger import setup_logger, log_exception
+from config import YANDEX_ACCESS_TOKEN, API_BASE_URL
+
+router = Router()
+logger = setup_logger(__name__)
+
+
+@router.message(Command("auth"))
+@router.message(F.text == "🔐 Авторизация")
+async def show_auth_info(message: Message):
+    """Показать информацию об авторизации"""
+    user_id = message.from_user.id
+    logger.info(f"👤 User {user_id} requested auth info")
+    
+    auth_msg = await message.answer("🔍 Проверяю авторизацию...")
+    
+    try:
+        api = YandexWebmasterAPI()
+        
+        # Проверка подключения
+        connection_ok = await api.test_connection()
+        
+        if not connection_ok:
+            await auth_msg.edit_text(
+                "❌ <b>Ошибка авторизации</b>\n\n"
+                "Не удалось подключиться к Yandex Webmaster API\n\n"
+                "<b>Возможные причины:</b>\n"
+                "• Неверный OAuth токен\n"
+                "• Токен истек\n"
+                "• Нет прав webmaster:read\n"
+                "• Проблемы с сетью\n\n"
+                "Используйте /token для детальной проверки"
+            )
+            return
+        
+        # Получение информации о пользователе
+        try:
+            user_info = await api.get_user_info()
+            user_id_yandex = user_info.get("user_id", "N/A")
+            
+            auth_text = (
+                "✅ <b>Авторизация успешна!</b>\n\n"
+                f"🆔 <b>User ID:</b> <code>{user_id_yandex}</code>\n"
+                f"🔗 <b>API:</b> {API_BASE_URL}\n"
+                f"🔑 <b>Токен:</b> Активен\n\n"
+                "📊 <b>Доступные разрешения:</b>\n"
+                "✅ webmaster:read - чтение данных\n\n"
+                "💡 <b>Совет:</b>\n"
+                "Используйте /hosts для просмотра ваших сайтов"
+            )
+            
+            await auth_msg.edit_text(auth_text)
+            logger.info(f"✅ Auth info sent to user {user_id}")
+            
+        except Exception as e:
+            logger.error(f"❌ Error getting user info")
+            log_exception(logger, e, "get_user_info")
+            
+            await auth_msg.edit_text(
+                "⚠️ <b>Частичная авторизация</b>\n\n"
+                "Подключение к API работает, но не удалось получить данные пользователя.\n\n"
+                f"<b>Ошибка:</b>\n<code>{type(e).__name__}: {str(e)[:200]}</code>\n\n"
+                "Используйте /diagnose для диагностики"
+            )
+            
+    except Exception as e:
+        logger.error(f"❌ Error in auth check for user {user_id}")
+        log_exception(logger, e, "show_auth_info")
+        
+        await auth_msg.edit_text(
+            "❌ <b>Ошибка проверки авторизации</b>\n\n"
+            f"<code>{type(e).__name__}: {str(e)[:200]}</code>\n\n"
+            "Проверьте:\n"
+            "1. Правильность токена в .env\n"
+            "2. Наличие прав webmaster:read\n"
+            "3. Подключение к интернету\n\n"
+            "Используйте /diagnose для детальной диагностики"
+        )
+
+
+@router.message(Command("token"))
+async def check_token(message: Message):
+    """Проверка OAuth токена"""
+    user_id = message.from_user.id
+    logger.info(f"👤 User {user_id} requested token check")
+    
+    check_msg = await message.answer("🔍 Проверяю токен...")
+    
+    try:
+        # Базовые проверки токена
+        token_length = len(YANDEX_ACCESS_TOKEN)
+        token_preview = YANDEX_ACCESS_TOKEN[:10] + "..." + YANDEX_ACCESS_TOKEN[-10:]
+        
+        check_text = (
+            "🔑 <b>Информация о токене</b>\n\n"
+            f"📏 <b>Длина:</b> {token_length} символов\n"
+            f"👁️ <b>Превью:</b> <code>{token_preview}</code>\n\n"
+        )
+        
+        # Проверка длины
+        if token_length < 20:
+            check_text += "⚠️ Токен выглядит слишком коротким\n\n"
+        else:
+            check_text += "✅ Длина токена нормальная\n\n"
+        
+        # Проверка подключения к API
+        check_text += "🔄 Проверяю подключение к API...\n"
+        await check_msg.edit_text(check_text)
+        
+        api = YandexWebmasterAPI()
+        connection_ok = await api.test_connection()
+        
+        if connection_ok:
+            check_text += "✅ Подключение к API успешно!\n\n"
+            
+            # Получение информации о пользователе
+            try:
+                user_info = await api.get_user_info()
+                user_id_yandex = user_info.get("user_id", "N/A")
+                
+                check_text += (
+                    f"👤 <b>User ID:</b> <code>{user_id_yandex}</code>\n"
+                    "✅ Токен полностью валиден\n\n"
+                    "━━━━━━━━━━━━━━━━━━━━\n\n"
+                    "💡 <b>Все проверки пройдены!</b>\n"
+                    "Можете начинать работу с ботом."
+                )
+                
+            except Exception as e:
+                check_text += (
+                    f"⚠️ Не удалось получить User ID\n"
+                    f"<code>{type(e).__name__}</code>\n\n"
+                    "Токен подключается, но могут быть ограничения."
+                )
+        else:
+            check_text += (
+                "❌ Подключение к API не удалось\n\n"
+                "<b>Возможные причины:</b>\n"
+                "• Неверный токен\n"
+                "• Токен истек\n"
+                "• Нет прав webmaster:read\n\n"
+                "📝 <b>Как получить новый токен:</b>\n"
+                "1. Перейдите на https://oauth.yandex.ru/\n"
+                "2. Создайте приложение\n"
+                "3. Запросите права webmaster:read\n"
+                "4. Скопируйте токен в .env файл"
+            )
+        
+        await check_msg.edit_text(check_text)
+        logger.info(f"✅ Token check completed for user {user_id}")
+        
+    except Exception as e:
+        logger.error(f"❌ Error checking token for user {user_id}")
+        log_exception(logger, e, "check_token")
+        
+        await check_msg.edit_text(
+            "❌ <b>Ошибка проверки токена</b>\n\n"
+            f"<code>{type(e).__name__}: {str(e)[:200]}</code>"
+        )
+
+
+@router.message(Command("diagnose"))
+async def diagnose_system(message: Message):
+    """Диагностика системы"""
+    user_id = message.from_user.id
+    logger.info(f"👤 User {user_id} requested system diagnosis")
+    
+    diag_msg = await message.answer("🔍 Запускаю диагностику системы...")
+    
+    diag_text = "🔬 <b>ДИАГНОСТИКА СИСТЕМЫ</b>\n\n"
+    
+    # 1. Проверка конфигурации
+    diag_text += "━━━ 1️⃣ КОНФИГУРАЦИЯ ━━━\n"
+    
+    try:
+        from config import VERSION, BOT_NAME, DATABASE_URL
+        diag_text += f"✅ Бот: {BOT_NAME} v{VERSION}\n"
+        diag_text += f"✅ База данных: {DATABASE_URL.split(':///')[-1] if ':///' in DATABASE_URL else 'configured'}\n"
+        
+        token_len = len(YANDEX_ACCESS_TOKEN)
+        if token_len >= 20:
+            diag_text += f"✅ OAuth токен: {token_len} символов\n"
+        else:
+            diag_text += f"⚠️ OAuth токен: {token_len} символов (слишком короткий)\n"
+        
+    except Exception as e:
+        diag_text += f"❌ Ошибка конфигурации: {type(e).__name__}\n"
+    
+    diag_text += "\n"
+    await diag_msg.edit_text(diag_text)
+    
+    # 2. Проверка API подключения
+    diag_text += "━━━ 2️⃣ API ПОДКЛЮЧЕНИЕ ━━━\n"
+    
+    try:
+        api = YandexWebmasterAPI()
+        diag_text += f"✅ API URL: {API_BASE_URL}\n"
+        
+        # Тест подключения
+        connection_ok = await api.test_connection()
+        if connection_ok:
+            diag_text += "✅ Подключение к API: OK\n"
+            
+            # Получение user info
+            try:
+                user_info = await api.get_user_info()
+                user_id_yandex = user_info.get("user_id", "N/A")
+                diag_text += f"✅ User ID: {user_id_yandex}\n"
+            except Exception as e:
+                diag_text += f"⚠️ User info: {type(e).__name__}\n"
+        else:
+            diag_text += "❌ Подключение к API: FAILED\n"
+            
+    except Exception as e:
+        diag_text += f"❌ API ошибка: {type(e).__name__}\n"
+    
+    diag_text += "\n"
+    await diag_msg.edit_text(diag_text)
+    
+    # 3. Проверка базы данных
+    diag_text += "━━━ 3️⃣ БАЗА ДАННЫХ ━━━\n"
+    
+    try:
+        from database import async_session_maker
+        from database.models import User
+        from sqlalchemy import select
+        
+        async with async_session_maker() as session:
+            result = await session.execute(select(User).limit(1))
+            user = result.scalar_one_or_none()
+            diag_text += "✅ База данных: OK\n"
+            
+            # Подсчет пользователей
+            from sqlalchemy import func
+            total_users = await session.scalar(select(func.count()).select_from(User))
+            diag_text += f"✅ Пользователей: {total_users}\n"
+            
+    except Exception as e:
+        diag_text += f"❌ БД ошибка: {type(e).__name__}\n"
+    
+    diag_text += "\n"
+    await diag_msg.edit_text(diag_text)
+    
+    # 4. Проверка файловой системы
+    diag_text += "━━━ 4️⃣ ФАЙЛОВАЯ СИСТЕМА ━━━\n"
+    
+    try:
+        from config import EXPORTS_DIR, LOGS_DIR, STATES_DIR
+        import os
+        
+        dirs_ok = 0
+        dirs_total = 3
+        
+        if os.path.exists(EXPORTS_DIR):
+            diag_text += f"✅ Exports: {EXPORTS_DIR.name}/\n"
+            dirs_ok += 1
+        else:
+            diag_text += f"❌ Exports: не найдена\n"
+        
+        if os.path.exists(LOGS_DIR):
+            diag_text += f"✅ Logs: {LOGS_DIR.name}/\n"
+            dirs_ok += 1
+        else:
+            diag_text += f"❌ Logs: не найдена\n"
+        
+        if os.path.exists(STATES_DIR):
+            diag_text += f"✅ States: {STATES_DIR.name}/\n"
+            dirs_ok += 1
+        else:
+            diag_text += f"❌ States: не найдена\n"
+        
+    except Exception as e:
+        diag_text += f"❌ FS ошибка: {type(e).__name__}\n"
+    
+    # Итоговый результат
+    diag_text += "\n━━━━━━━━━━━━━━━━━━━━\n\n"
+    
+    # Подсчет проблем
+    errors = diag_text.count("❌")
+    warnings = diag_text.count("⚠️")
+    
+    if errors == 0 and warnings == 0:
+        diag_text += "✅ <b>Все проверки пройдены!</b>\n"
+        diag_text += "Система работает нормально.\n"
+    elif errors == 0:
+        diag_text += f"⚠️ <b>Найдено предупреждений: {warnings}</b>\n"
+        diag_text += "Система работает, но есть замечания.\n"
+    else:
+        diag_text += f"❌ <b>Найдено ошибок: {errors}</b>\n"
+        if warnings > 0:
+            diag_text += f"⚠️ <b>Предупреждений: {warnings}</b>\n"
+        diag_text += "\nНеобходимо исправить ошибки.\n"
+    
+    diag_text += "\n💡 Проверьте логи в директории logs/"
+    
+    await diag_msg.edit_text(diag_text)
+    logger.info(f"✅ Diagnosis completed for user {user_id}: {errors} errors, {warnings} warnings")
+
+
+EOF
+# ============================================================================
 # config.py
 # ============================================================================
 cat > $PROJECT_NAME/config.py <<'EOF'
@@ -351,9 +661,9 @@ DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///webmaster_bot.db")
 # API настройки
 # ============================================================================
 API_BASE_URL = "https://api.webmaster.yandex.net/v4"
-API_TIMEOUT = 30
-MAX_RETRIES = int(os.getenv("RETRY_ATTEMPTS", "3"))
-RETRY_DELAY = int(os.getenv("RETRY_DELAY", "5"))
+API_TIMEOUT = 120  # ✅ 2 минуты вместо 30 секунд
+MAX_RETRIES = int(os.getenv("RETRY_ATTEMPTS", "5"))  # ✅ 5 попыток вместо 3
+RETRY_DELAY = int(os.getenv("RETRY_DELAY", "10"))  # ✅ 10 сек вместо 5
 
 # ============================================================================
 # Логирование
@@ -594,6 +904,7 @@ async def get_session() -> AsyncSession:
         yield session
 EOF
 
+
 # ============================================================================
 # database/models.py
 # ============================================================================
@@ -685,26 +996,30 @@ EOF
 # keyboards/__init__.py
 # ============================================================================
 cat > $PROJECT_NAME/keyboards/__init__.py <<'EOF'
+
 """Модуль клавиатур для бота"""
 from keyboards.menu import (
     get_main_menu,
     get_hosts_keyboard,
-    get_host_actions_keyboard,
     get_export_types_keyboard,
     get_device_types_keyboard,
     get_export_formats_keyboard,
-    get_back_button
+    get_continue_keyboard,
+    get_back_button,
+    get_cancel_keyboard
 )
 
 __all__ = [
     'get_main_menu',
     'get_hosts_keyboard',
-    'get_host_actions_keyboard',
     'get_export_types_keyboard',
     'get_device_types_keyboard',
     'get_export_formats_keyboard',
-    'get_back_button'
+    'get_continue_keyboard',
+    'get_back_button',
+    'get_cancel_keyboard'
 ]
+
 EOF
 
 # ============================================================================
@@ -712,19 +1027,23 @@ EOF
 # ============================================================================
 cat > $PROJECT_NAME/keyboards/menu.py <<'EOF'
 
+"""
+keyboards/menu.py - ИСПРАВЛЕННАЯ ВЕРСИЯ
+Добавлена функция get_continue_keyboard
+"""
+
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.keyboard import ReplyKeyboardBuilder, InlineKeyboardBuilder
 
-from config import DEVICE_TYPES, EXPORT_TYPES, EXPORT_FORMATS
+from config import DEVICE_TYPES, EXPORT_FORMATS
 
 
 def get_main_menu() -> ReplyKeyboardMarkup:
-    """Главное меню бота"""
+    """Главное меню"""
     builder = ReplyKeyboardBuilder()
     
     builder.row(
-        KeyboardButton(text="🌐 Мои сайты"),
-        KeyboardButton(text="📊 Статистика")
+        KeyboardButton(text="🌐 Мои сайты")
     )
     builder.row(
         KeyboardButton(text="🔐 Авторизация"),
@@ -738,30 +1057,25 @@ def get_hosts_keyboard(hosts: list, page: int = 0, page_size: int = 10) -> Inlin
     """Клавиатура со списком хостов"""
     builder = InlineKeyboardBuilder()
     
-    # Пагинация
     start_idx = page * page_size
     end_idx = start_idx + page_size
     page_hosts = hosts[start_idx:end_idx]
     
-    # Кнопки хостов - используем индекс вместо host_id
     for idx, host in enumerate(page_hosts, start=start_idx):
-        # Проверка типа host (объект или словарь)
         if hasattr(host, 'unicode_host_url'):
             host_url = host.unicode_host_url or host.host_url
         else:
             host_url = host.get("unicode_host_url") or host.get("host_url", "Unknown")
         
-        # Ограничиваем длину URL для кнопки
         display_url = host_url if len(host_url) <= 40 else host_url[:37] + "..."
         
         builder.button(
             text=f"🌐 {display_url}",
-            callback_data=f"host_idx:{idx}"  # Используем индекс
+            callback_data=f"host_idx:{idx}"
         )
     
     builder.adjust(1)
     
-    # Навигация
     nav_buttons = []
     
     if page > 0:
@@ -779,7 +1093,6 @@ def get_hosts_keyboard(hosts: list, page: int = 0, page_size: int = 10) -> Inlin
     if nav_buttons:
         builder.row(*nav_buttons)
     
-    # Кнопка обновления
     builder.row(InlineKeyboardButton(
         text="🔄 Обновить список",
         callback_data="refresh_hosts"
@@ -788,44 +1101,90 @@ def get_hosts_keyboard(hosts: list, page: int = 0, page_size: int = 10) -> Inlin
     return builder.as_markup()
 
 
-def get_host_actions_keyboard() -> InlineKeyboardMarkup:
-    """Клавиатура действий для выбранного хоста (host_id берется из state)"""
+def get_export_types_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура выбора типа экспорта"""
     builder = InlineKeyboardBuilder()
     
     builder.button(
-        text="📊 Создать экспорт",
-        callback_data="export_start"
+        text="🔥 Популярные запросы",
+        callback_data="export_type:popular"
     )
+    
     builder.button(
-        text="📈 Статистика сайта",
-        callback_data="host_stats"
+        text="📈 История запросов",
+        callback_data="export_type:history"
     )
+    
     builder.button(
-        text="🔄 Обновить информацию",
-        callback_data="refresh_host"
+        text="📊 Расширенная история",
+        callback_data="export_type:history_all"
     )
+    
     builder.button(
-        text="🔙 К списку сайтов",
-        callback_data="back_to_hosts"
+        text="🔬 Детальная аналитика",
+        callback_data="export_type:analytics"
+    )
+    
+    builder.button(
+        text="🚀 Расширенный экспорт",
+        callback_data="export_type:enhanced"
+    )
+    
+    builder.button(
+        text="🔗 Страницы в поиске",
+        callback_data="export_type:pages_in_search"
+    )
+    
+    builder.button(
+        text="📋 События со страницами",
+        callback_data="export_type:page_events"
+    )
+    
+    builder.button(
+        text="❓ Что выбрать?",
+        callback_data="export_help"
+    )
+    
+    builder.button(
+        text="🔙 К информации о сайте",
+        callback_data="back_to_host_info"
     )
     
     builder.adjust(1)
     return builder.as_markup()
 
 
-def get_export_types_keyboard() -> InlineKeyboardMarkup:
-    """Клавиатура выбора типа экспорта"""
+def get_date_range_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура выбора периода дат"""
     builder = InlineKeyboardBuilder()
     
-    for export_key, export_name in EXPORT_TYPES.items():
-        builder.button(
-            text=export_name,
-            callback_data=f"export_type:{export_key}"
-        )
-    
+    builder.button(
+        text="📅 Последние 7 дней",
+        callback_data="date_range:last_7_days"
+    )
+    builder.button(
+        text="📅 Последние 14 дней",
+        callback_data="date_range:last_14_days"
+    )
+    builder.button(
+        text="📅 Последние 30 дней",
+        callback_data="date_range:last_30_days"
+    )
+    builder.button(
+        text="📅 Текущий месяц",
+        callback_data="date_range:current_month"
+    )
+    builder.button(
+        text="📅 Прошлый месяц",
+        callback_data="date_range:last_month"
+    )
+    builder.button(
+        text="✏️ Свой период",
+        callback_data="date_range:custom"
+    )
     builder.button(
         text="🔙 Назад",
-        callback_data="back_to_host_info"
+        callback_data="back_to_export_type"
     )
     
     builder.adjust(1)
@@ -851,7 +1210,7 @@ def get_device_types_keyboard() -> InlineKeyboardMarkup:
     
     builder.button(
         text="🔙 Назад",
-        callback_data="back_to_export_type"
+        callback_data="back_to_date_select"
     )
     
     builder.adjust(2)
@@ -883,8 +1242,29 @@ def get_export_formats_keyboard() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+def get_continue_keyboard() -> InlineKeyboardMarkup:
+    """
+    ✅ НОВАЯ ФУНКЦИЯ: Клавиатура с кнопкой "Продолжить"
+    Используется для экспорта URL после показа информационного сообщения
+    """
+    builder = InlineKeyboardBuilder()
+    
+    builder.button(
+        text="▶️ Продолжить",
+        callback_data="continue_export"
+    )
+    
+    builder.button(
+        text="🔙 Назад",
+        callback_data="back_to_export_type"
+    )
+    
+    builder.adjust(1)
+    return builder.as_markup()
+
+
 def get_back_button(callback_data: str = "back") -> InlineKeyboardMarkup:
-    """Универсальная кнопка "Назад" """
+    """Универсальная кнопка 'Назад'"""
     builder = InlineKeyboardBuilder()
     builder.button(text="🔙 Назад", callback_data=callback_data)
     return builder.as_markup()
@@ -902,6 +1282,7 @@ EOF
 # states/export.py
 # ============================================================================
 cat > $PROJECT_NAME/states/export.py <<'EOF'
+
 from aiogram.fsm.state import State, StatesGroup
 
 
@@ -914,21 +1295,26 @@ class ExportStates(StatesGroup):
     # Выбор типа экспорта
     selecting_export_type = State()
     
+    # НОВОЕ: Выбор периода дат
+    selecting_date_range = State()
+    
+    # НОВОЕ: Ввод дат вручную
+    setting_date_from = State()
+    setting_date_to = State()
+    
     # Выбор устройства
     selecting_device = State()
     
     # Выбор формата
     selecting_format = State()
     
-    # Настройка дат
-    setting_date_from = State()
-    setting_date_to = State()
-    
     # Процесс экспорта
     exporting = State()
     
     # Завершение
     completed = State()
+
+
 EOF
 
 # ============================================================================
@@ -1336,13 +1722,24 @@ EOF
 # ============================================================================
 cat > $PROJECT_NAME/handlers/hosts.py <<'EOF'
 
+"""
+ИСПРАВЛЕННЫЙ handlers/hosts.py
+Версия 3.3 - Убрано промежуточное меню, сразу переход к выбору экспорта
+
+ИЗМЕНЕНИЯ:
+- При клике на сайт сразу показываем типы экспорта
+- Убрана функция get_host_actions_keyboard()
+- Кнопка "Назад" ведет сразу к списку сайтов
+"""
+
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
+from aiogram.exceptions import TelegramBadRequest
 
 from services.api import YandexWebmasterAPI
-from keyboards.menu import get_hosts_keyboard, get_host_actions_keyboard
+from keyboards.menu import get_hosts_keyboard, get_export_types_keyboard
 from utils.logger import setup_logger, log_exception
 from utils.helpers import format_number
 
@@ -1388,7 +1785,7 @@ async def show_hosts(message: Message, state: FSMContext):
         await state.update_data(hosts=hosts_data)
         
         hosts_text = f"🌐 <b>Ваши сайты ({len(hosts_data)}):</b>\n\n"
-        hosts_text += "Выберите сайт для просмотра информации:"
+        hosts_text += "Выберите сайт для экспорта данных:"
         
         await loading_msg.edit_text(
             hosts_text,
@@ -1422,12 +1819,18 @@ async def paginate_hosts(callback: CallbackQuery, state: FSMContext):
         return
     
     hosts_text = f"🌐 <b>Ваши сайты ({len(hosts)}):</b>\n\n"
-    hosts_text += "Выберите сайт для просмотра информации:"
+    hosts_text += "Выберите сайт для экспорта данных:"
     
-    await callback.message.edit_text(
-        hosts_text,
-        reply_markup=get_hosts_keyboard(hosts, page=page)
-    )
+    try:
+        await callback.message.edit_text(
+            hosts_text,
+            reply_markup=get_hosts_keyboard(hosts, page=page)
+        )
+    except TelegramBadRequest as e:
+        if "message is not modified" in str(e):
+            logger.debug("Message content is the same")
+        else:
+            raise
 
 
 @router.callback_query(F.data == "refresh_hosts")
@@ -1438,8 +1841,11 @@ async def refresh_hosts(callback: CallbackQuery, state: FSMContext):
 
 
 @router.callback_query(F.data.startswith("host_idx:"))
-async def show_host_info(callback: CallbackQuery, state: FSMContext):
-    """Показать информацию о выбранном хосте"""
+async def show_host_export_menu(callback: CallbackQuery, state: FSMContext):
+    """
+    ✅ ИСПРАВЛЕНО: Сразу показываем меню экспорта
+    Убрано промежуточное меню с информацией о сайте
+    """
     await callback.answer()
     
     # Получаем индекс из callback
@@ -1456,94 +1862,25 @@ async def show_host_info(callback: CallbackQuery, state: FSMContext):
     
     host_data = hosts[host_idx]
     host_id = host_data["host_id"]
+    host_url = host_data.get("unicode_host_url") or host_data.get("host_url", "Unknown")
     
     logger.info(f"👤 User {user_id} selected host: {host_id}")
+    logger.info(f"   Going directly to export menu")
     
-    await callback.message.edit_text("🔍 Загружаю информацию о сайте...")
+    # Сохраняем выбранный host_id в state
+    await state.update_data(selected_host_id=host_id, selected_host_url=host_url)
     
-    try:
-        api = YandexWebmasterAPI()
-        
-        # Получение базовой информации о хосте
-        logger.info(f"Fetching host info for {host_id}")
-        host = await api.get_host_info(host_id)
-        
-        if not host:
-            await callback.message.edit_text("❌ Хост не найден")
-            return
-        
-        # Сохраняем выбранный host_id в state
-        await state.update_data(selected_host_id=host_id)
-        
-        # Попытка получить сводную информацию
-        try:
-            logger.info(f"Fetching host summary for {host_id}")
-            summary = await api.get_host_summary(host_id)
-            
-            info_text = (
-                f"🌐 <b>{host.unicode_host_url or host.host_url}</b>\n\n"
-                f"🆔 Host ID: <code>{host.host_id[:50]}...</code>\n"
-                f"✅ Верификация: {host.verification_state or 'N/A'}\n\n"
-            )
-            
-            if summary:
-                # Индексация
-                if hasattr(summary, 'indexing_indicators') and summary.indexing_indicators:
-                    idx = summary.indexing_indicators
-                    info_text += "📊 <b>Индексация:</b>\n"
-                    if hasattr(idx, 'site_pages'):
-                        info_text += f"   Страниц на сайте: {format_number(idx.site_pages)}\n"
-                    if hasattr(idx, 'searchable'):
-                        info_text += f"   В поиске: {format_number(idx.searchable)}\n"
-                    if hasattr(idx, 'excluded'):
-                        info_text += f"   Исключено: {format_number(idx.excluded)}\n"
-                    info_text += "\n"
-                
-                # Поисковые запросы
-                if hasattr(summary, 'search_query_indicators') and summary.search_query_indicators:
-                    sq = summary.search_query_indicators
-                    info_text += "🔍 <b>Поисковые запросы:</b>\n"
-                    if hasattr(sq, 'total_shows'):
-                        info_text += f"   Показов: {format_number(sq.total_shows)}\n"
-                    if hasattr(sq, 'total_clicks'):
-                        info_text += f"   Кликов: {format_number(sq.total_clicks)}\n"
-                    if hasattr(sq, 'ctr'):
-                        info_text += f"   CTR: {sq.ctr:.2f}%\n"
-                    info_text += "\n"
-                
-                # Ссылки
-                if hasattr(summary, 'links_indicators') and summary.links_indicators:
-                    links = summary.links_indicators
-                    info_text += "🔗 <b>Ссылки:</b>\n"
-                    if hasattr(links, 'total_internal_links'):
-                        info_text += f"   Внутренних: {format_number(links.total_internal_links)}\n"
-                    if hasattr(links, 'total_external_links'):
-                        info_text += f"   Внешних: {format_number(links.total_external_links)}\n"
-            
-            logger.info("✅ Summary retrieved successfully")
-            
-        except Exception as e:
-            logger.warning(f"Could not fetch summary: {type(e).__name__}: {str(e)}")
-            info_text = (
-                f"🌐 <b>{host.unicode_host_url or host.host_url}</b>\n\n"
-                f"🆔 Host ID: <code>{host.host_id[:50]}...</code>\n"
-                f"✅ Статус: {host.verification_state or 'N/A'}\n"
-            )
-        
-        await callback.message.edit_text(
-            info_text,
-            reply_markup=get_host_actions_keyboard()
-        )
-        
-        logger.info(f"✅ Host info sent to user {user_id}")
-        
-    except Exception as e:
-        logger.error(f"❌ Error showing host info")
-        log_exception(logger, e, "show_host_info")
-        await callback.message.answer(
-            "❌ Ошибка при загрузке информации о сайте\n\n"
-            f"<code>{type(e).__name__}: {str(e)[:100]}</code>"
-        )
+    # ✅ СРАЗУ ПОКАЗЫВАЕМ ТИПЫ ЭКСПОРТА
+    await callback.message.edit_text(
+        f"🌐 <b>Сайт:</b> {host_url}\n\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "📊 <b>Выберите тип экспорта данных:</b>\n\n"
+        "Каждый тип дает разные данные и уровень детализации.\n\n"
+        "💡 <i>Нажмите \"❓ Что выбрать?\" для подробного описания всех типов</i>",
+        reply_markup=get_export_types_keyboard()
+    )
+    
+    logger.info(f"✅ Export type selection displayed for user {user_id}")
 
 
 @router.callback_query(F.data == "back_to_hosts")
@@ -1556,80 +1893,41 @@ async def back_to_hosts(callback: CallbackQuery, state: FSMContext):
     
     if hosts:
         hosts_text = f"🌐 <b>Ваши сайты ({len(hosts)}):</b>\n\n"
-        hosts_text += "Выберите сайт для просмотра информации:"
+        hosts_text += "Выберите сайт для экспорта данных:"
         
-        await callback.message.edit_text(
-            hosts_text,
-            reply_markup=get_hosts_keyboard(hosts)
-        )
+        try:
+            await callback.message.edit_text(
+                hosts_text,
+                reply_markup=get_hosts_keyboard(hosts)
+            )
+        except TelegramBadRequest as e:
+            if "message is not modified" in str(e):
+                logger.debug("Message already shows hosts list")
+            else:
+                raise
     else:
         await callback.message.delete()
         await show_hosts(callback.message, state)
 
 
-@router.callback_query(F.data == "refresh_host")
-async def refresh_host_info(callback: CallbackQuery, state: FSMContext):
-    """Обновление информации о хосте"""
-    await callback.answer("🔄 Обновляю информацию...")
-    
-    user_data = await state.get_data()
-    host_id = user_data.get("selected_host_id")
-    
-    if not host_id:
-        await callback.answer("Хост не выбран", show_alert=True)
-        return
-    
-    # Повторный запрос информации
-    try:
-        api = YandexWebmasterAPI()
-        host = await api.get_host_info(host_id)
-        
-        if not host:
-            await callback.message.edit_text("❌ Хост не найден")
-            return
-        
-        # Получение summary
-        try:
-            summary = await api.get_host_summary(host_id)
-            info_text = (
-                f"🌐 <b>{host.unicode_host_url or host.host_url}</b>\n\n"
-                f"🆔 Host ID: <code>{host.host_id[:50]}...</code>\n"
-                f"✅ Верификация: {host.verification_state or 'N/A'}\n\n"
-            )
-            
-            if summary and hasattr(summary, 'indexing_indicators') and summary.indexing_indicators:
-                idx = summary.indexing_indicators
-                info_text += "📊 <b>Индексация:</b>\n"
-                if hasattr(idx, 'site_pages'):
-                    info_text += f"   Страниц на сайте: {format_number(idx.site_pages)}\n"
-                if hasattr(idx, 'searchable'):
-                    info_text += f"   В поиске: {format_number(idx.searchable)}\n"
-                if hasattr(idx, 'excluded'):
-                    info_text += f"   Исключено: {format_number(idx.excluded)}\n"
-        
-        except Exception:
-            info_text = (
-                f"🌐 <b>{host.unicode_host_url or host.host_url}</b>\n\n"
-                f"🆔 Host ID: <code>{host.host_id[:50]}...</code>\n"
-                f"✅ Статус: {host.verification_state or 'N/A'}\n"
-            )
-        
-        await callback.message.edit_text(
-            info_text,
-            reply_markup=get_host_actions_keyboard()
-        )
-        
-    except Exception as e:
-        logger.error("Error refreshing host info")
-        log_exception(logger, e, "refresh_host_info")
-        await callback.answer("Ошибка обновления", show_alert=True)
-
-
 @router.callback_query(F.data == "back_to_host_info")
 async def back_to_host_info(callback: CallbackQuery, state: FSMContext):
-    """Вернуться к информации о хосте"""
+    """
+    ✅ ИСПРАВЛЕНО: Возврат к выбору экспорта вместо информации о хосте
+    """
     await callback.answer()
-    await refresh_host_info(callback, state)
+    
+    user_data = await state.get_data()
+    host_url = user_data.get("selected_host_url", "Неизвестный сайт")
+    
+    await callback.message.edit_text(
+        f"🌐 <b>Сайт:</b> {host_url}\n\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "📊 <b>Выберите тип экспорта данных:</b>\n\n"
+        "Каждый тип дает разные данные и уровень детализации.\n\n"
+        "💡 <i>Нажмите \"❓ Что выбрать?\" для подробного описания всех типов</i>",
+        reply_markup=get_export_types_keyboard()
+    )
 
 EOF
 
@@ -1638,76 +1936,330 @@ EOF
 # ============================================================================
 cat > $PROJECT_NAME/handlers/export.py <<'EOF'
 
-from aiogram import Router, F
-from aiogram.types import CallbackQuery, FSInputFile
-from aiogram.fsm.context import FSMContext
-from datetime import datetime, timedelta
+"""
+handlers/export.py - ИСПРАВЛЕННАЯ ВЕРСИЯ v3.4
+Добавлена полная поддержка экспорта URL с кнопкой "Продолжить"
+"""
 
-from services.export import ExportService
-from services.api import YandexWebmasterAPI
+from aiogram import Router, F
+from aiogram.types import CallbackQuery, Message, FSInputFile
+from aiogram.fsm.context import FSMContext
+from datetime import datetime
+from pathlib import Path
+
 from keyboards.menu import (
     get_export_types_keyboard,
+    get_date_range_keyboard,
     get_device_types_keyboard,
-    get_export_formats_keyboard
+    get_export_formats_keyboard,
+    get_back_button,
+    get_continue_keyboard
 )
-from utils.logger import setup_logger, log_exception
-from utils.helpers import format_number, get_file_size_str, create_progress_bar
 from states.export import ExportStates
-from database import async_session_maker
-from database.models import Export
+from services.export import ExportService
+from services.api import YandexWebmasterAPI
+from utils.logger import setup_logger, log_exception
+from utils.helpers import validate_date_range, get_date_range_presets
 
 router = Router()
 logger = setup_logger(__name__)
 
 
+# ============================================================================
+# 1. НАЧАЛО ЭКСПОРТА - СРАЗУ ПОКАЗЫВАЕМ ТИПЫ
+# ============================================================================
+
 @router.callback_query(F.data == "export_start")
-async def start_export(callback: CallbackQuery, state: FSMContext):
-    """Начало процесса экспорта"""
+async def export_start_handler(callback: CallbackQuery, state: FSMContext):
+    """
+    🚀 Сразу показываем меню выбора типа экспорта
+    """
     await callback.answer()
     
-    # Проверяем, что host_id есть в state
-    user_data = await state.get_data()
-    host_id = user_data.get("selected_host_id")
+    user_id = callback.from_user.id
+    logger.info(f"👤 User {user_id} started export - showing type selection")
     
-    if not host_id:
-        await callback.answer("Хост не выбран", show_alert=True)
+    # Получаем данные о выбранном хосте
+    user_data = await state.get_data()
+    selected_host_id = user_data.get("selected_host_id")
+    
+    if not selected_host_id:
+        await callback.answer("❌ Хост не выбран", show_alert=True)
+        logger.error(f"No host selected for user {user_id}")
         return
     
-    user_id = callback.from_user.id
-    logger.info(f"👤 User {user_id} starting export for host {host_id}")
+    logger.info(f"   Host ID: {selected_host_id}")
     
-    await state.set_state(ExportStates.selecting_export_type)
-    
+    # Показываем типы экспорта
     await callback.message.edit_text(
-        "📊 <b>Выберите тип экспорта:</b>\n\n"
-        "• Популярные запросы - ТОП поисковых запросов\n"
-        "• История запросов - История с фильтрацией\n"
-        "• Расширенная история - Детальные данные\n"
-        "• Детальная аналитика - Полная аналитика\n"
-        "• Расширенный экспорт - Максимум информации",
+        "📊 <b>Выберите тип экспорта данных:</b>\n\n"
+        "Каждый тип дает разные данные и уровень детализации.\n\n"
+        "💡 <i>Нажмите \"❓ Что выбрать?\" для подробного описания всех типов</i>",
         reply_markup=get_export_types_keyboard()
     )
+    
+    await state.set_state(ExportStates.selecting_export_type)
+    logger.info("✅ Export type selection menu displayed")
 
+
+# ============================================================================
+# 2. ВЫБОР ТИПА ЭКСПОРТА
+# ============================================================================
 
 @router.callback_query(F.data.startswith("export_type:"))
 async def select_export_type(callback: CallbackQuery, state: FSMContext):
-    """Выбор типа экспорта"""
+    """Обработка выбора типа экспорта"""
     await callback.answer()
     
     export_type = callback.data.split(":", 1)[1]
+    user_id = callback.from_user.id
     
-    logger.info(f"User {callback.from_user.id} selected export type: {export_type}")
+    logger.info(f"👤 User {user_id} selected export type: {export_type}")
     
-    # Сохранение типа экспорта
+    # Описания типов экспорта
+    export_descriptions = {
+        "popular": {
+            "name": "🔥 Популярные запросы",
+            "desc": "Самый простой и быстрый вариант. Получите список ТОП запросов с показами, кликами, CTR и позициями."
+        },
+        "history": {
+            "name": "📈 История запросов",
+            "desc": "Динамика изменений по ТОП-100 запросам. Отследите рост или падение по каждому запросу за период."
+        },
+        "history_all": {
+            "name": "📊 Расширенная история",
+            "desc": "Общая статистика по всему сайту. Суммарные показы/клики за каждый день без разбивки по запросам."
+        },
+        "analytics": {
+            "name": "🔬 Детальная аналитика",
+            "desc": "ТОП-200 запросов с расчетом трендов в %. Максимум информации для глубокого анализа."
+        },
+        "enhanced": {
+            "name": "🚀 Расширенный экспорт",
+            "desc": "До 1,000 запросов с метаданными и временными метками. Идеально для архивирования."
+        },
+        "urls": {
+            "name": "🔗 Экспорт URL страниц",
+            "desc": "Связь между запросами и URL страниц. Найдите каннибализацию ключевых слов и нецелевой трафик."
+        }
+    }
+    
+    # Сохраняем выбранный тип
     await state.update_data(export_type=export_type)
-    await state.set_state(ExportStates.selecting_device)
+    
+    # ✅ ИСПРАВЛЕНИЕ: Для типа "urls" показываем информацию с кнопкой "Продолжить"
+    if export_type == "urls":
+        await callback.message.edit_text(
+            "🔗 <b>Экспорт URL страниц</b>\n\n"
+            "⚠️ <b>Внимание:</b> Этот тип экспорта показывает связь между:\n"
+            "• Поисковыми запросами\n"
+            "• URL страниц, которые показываются в поиске\n"
+            "• Статистикой показов/кликов для каждой связки\n\n"
+            "<b>Зачем это нужно?</b>\n"
+            "✅ Найти страницы с нецелевым трафиком\n"
+            "✅ Обнаружить каннибализацию ключевых слов\n"
+            "✅ Оптимизировать структуру сайта\n\n"
+            "<b>Пример:</b>\n"
+            "<code>\"купить ноутбук\" → /catalog/notebooks (850 показов)\n"
+            "\"купить ноутбук\" → /blog/review (120 показов)</code>\n\n"
+            "⚠️ Две страницы конкурируют за один запрос!\n\n"
+            "Нажмите <b>\"Продолжить\"</b> для настройки параметров экспорта.",
+            reply_markup=get_continue_keyboard()
+        )
+        # НЕ меняем состояние - ждем нажатия "Продолжить"
+        return
+    
+    # Для остальных типов - переходим к выбору периода
+    type_info = export_descriptions.get(export_type, {
+        "name": export_type.upper(),
+        "desc": "Экспорт данных из Yandex Webmaster"
+    })
     
     await callback.message.edit_text(
-        "📱 <b>Выберите тип устройства:</b>\n\n"
-        "Для каких устройств выгрузить данные?",
+        f"{type_info['name']}\n\n"
+        f"<i>{type_info['desc']}</i>\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"📅 <b>Выберите период данных:</b>\n\n"
+        f"Выберите предустановленный период или укажите свой:",
+        reply_markup=get_date_range_keyboard()
+    )
+    
+    await state.set_state(ExportStates.selecting_date_range)
+    logger.info(f"✅ Date range selection displayed for {export_type}")
+
+
+# ✅ НОВЫЙ ОБРАБОТЧИК: Кнопка "Продолжить" для экспорта URL
+@router.callback_query(F.data == "continue_export")
+async def continue_export_urls(callback: CallbackQuery, state: FSMContext):
+    """Продолжить настройку экспорта URL после информационного сообщения"""
+    await callback.answer()
+    
+    user_id = callback.from_user.id
+    logger.info(f"👤 User {user_id} confirmed URLs export - showing date selection")
+    
+    # Переходим к выбору периода дат
+    await callback.message.edit_text(
+        f"🔗 <b>Экспорт URL страниц</b>\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"📅 <b>Выберите период данных:</b>\n\n"
+        f"Выберите предустановленный период или укажите свой:",
+        reply_markup=get_date_range_keyboard()
+    )
+    
+    await state.set_state(ExportStates.selecting_date_range)
+    logger.info("✅ Date range selection displayed for URLs export")
+
+
+# ============================================================================
+# 3. ВЫБОР ПЕРИОДА ДАТ
+# ============================================================================
+
+@router.callback_query(F.data.startswith("date_range:"))
+async def select_date_range(callback: CallbackQuery, state: FSMContext):
+    """Выбор периода дат"""
+    await callback.answer()
+    
+    range_key = callback.data.split(":", 1)[1]
+    user_id = callback.from_user.id
+    
+    logger.info(f"👤 User {user_id} selected date range: {range_key}")
+    
+    if range_key == "custom":
+        await callback.message.edit_text(
+            "📅 <b>Укажите дату начала периода</b>\n\n"
+            "Формат: <code>YYYY-MM-DD</code>\n"
+            "Например: <code>2024-12-01</code>\n\n"
+            "💡 Отправьте сообщение с датой:",
+            reply_markup=get_back_button("back_to_date_select")
+        )
+        await state.set_state(ExportStates.setting_date_from)
+        return
+    
+    # Получаем предустановленный период
+    presets = get_date_range_presets()
+    
+    if range_key not in presets:
+        logger.error(f"Unknown date range preset: {range_key}")
+        await callback.answer("❌ Неизвестный период", show_alert=True)
+        return
+    
+    date_range = presets[range_key]
+    date_from = date_range["from"]
+    date_to = date_range["to"]
+    
+    await state.update_data(date_from=date_from, date_to=date_to)
+    
+    logger.info(f"✅ Date range set: {date_from} to {date_to}")
+    
+    # Переходим к выбору устройства
+    await callback.message.edit_text(
+        f"📅 <b>Выбран период:</b>\n"
+        f"{date_range['name']}\n"
+        f"<code>С {date_from} по {date_to}</code>\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"📱 <b>Выберите тип устройства:</b>\n\n"
+        f"Для какого типа устройств выгрузить данные?",
         reply_markup=get_device_types_keyboard()
     )
+    
+    await state.set_state(ExportStates.selecting_device)
 
+
+# ============================================================================
+# 4. ВВОД ДАТ ВРУЧНУЮ
+# ============================================================================
+
+@router.message(ExportStates.setting_date_from)
+async def process_date_from(message: Message, state: FSMContext):
+    """Обработка даты начала"""
+    date_from = message.text.strip()
+    user_id = message.from_user.id
+    
+    logger.info(f"👤 User {user_id} entered date_from: {date_from}")
+    
+    # Валидация формата
+    try:
+        datetime.strptime(date_from, "%Y-%m-%d")
+    except ValueError:
+        logger.warning(f"Invalid date format from user {user_id}: {date_from}")
+        await message.answer(
+            "❌ <b>Неверный формат даты!</b>\n\n"
+            "Используйте формат: <code>YYYY-MM-DD</code>\n"
+            "Например: <code>2024-12-01</code>\n\n"
+            "Попробуйте еще раз:"
+        )
+        return
+    
+    # Проверка что дата не в будущем
+    if datetime.strptime(date_from, "%Y-%m-%d") > datetime.now():
+        await message.answer(
+            "❌ Дата не может быть в будущем!\n\n"
+            "Попробуйте еще раз:"
+        )
+        return
+    
+    await state.update_data(date_from=date_from)
+    logger.info(f"✅ date_from saved: {date_from}")
+    
+    await message.answer(
+        f"✅ <b>Дата начала:</b> <code>{date_from}</code>\n\n"
+        f"📅 <b>Теперь укажите дату окончания</b>\n\n"
+        f"Формат: <code>YYYY-MM-DD</code>\n"
+        f"Например: <code>2024-12-19</code>",
+        reply_markup=get_back_button("back_to_date_select")
+    )
+    
+    await state.set_state(ExportStates.setting_date_to)
+
+
+@router.message(ExportStates.setting_date_to)
+async def process_date_to(message: Message, state: FSMContext):
+    """Обработка даты окончания"""
+    date_to = message.text.strip()
+    user_id = message.from_user.id
+    
+    logger.info(f"👤 User {user_id} entered date_to: {date_to}")
+    
+    # Валидация формата
+    try:
+        datetime.strptime(date_to, "%Y-%m-%d")
+    except ValueError:
+        logger.warning(f"Invalid date format from user {user_id}: {date_to}")
+        await message.answer(
+            "❌ <b>Неверный формат даты!</b>\n\n"
+            "Используйте формат: <code>YYYY-MM-DD</code>\n"
+            "Попробуйте еще раз:"
+        )
+        return
+    
+    # Валидация диапазона
+    user_data = await state.get_data()
+    date_from = user_data.get("date_from")
+    
+    is_valid, error_msg = validate_date_range(date_from, date_to)
+    
+    if not is_valid:
+        logger.warning(f"Invalid date range: {error_msg}")
+        await message.answer(f"❌ {error_msg}\n\nПопробуйте еще раз:")
+        return
+    
+    await state.update_data(date_to=date_to)
+    logger.info(f"✅ date_to saved: {date_to}")
+    
+    await message.answer(
+        f"✅ <b>Период выбран:</b>\n"
+        f"<code>С {date_from} по {date_to}</code>\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"📱 <b>Выберите тип устройства:</b>",
+        reply_markup=get_device_types_keyboard()
+    )
+    
+    await state.set_state(ExportStates.selecting_device)
+
+
+# ============================================================================
+# 5. ВЫБОР ТИПА УСТРОЙСТВА
+# ============================================================================
 
 @router.callback_query(F.data.startswith("export_device:"))
 async def select_device_type(callback: CallbackQuery, state: FSMContext):
@@ -1715,412 +2267,432 @@ async def select_device_type(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     
     device_type = callback.data.split(":", 1)[1]
+    user_id = callback.from_user.id
     
-    logger.info(f"User {callback.from_user.id} selected device: {device_type}")
-    
-    # Сохранение устройства
     await state.update_data(device_type=device_type)
-    await state.set_state(ExportStates.selecting_format)
+    
+    logger.info(f"👤 User {user_id} selected device: {device_type}")
+    
+    device_names = {
+        "ALL": "📱 Все устройства",
+        "DESKTOP": "💻 Десктоп",
+        "MOBILE": "📱 Мобильные",
+        "TABLET": "📲 Планшеты"
+    }
+    
+    device_display = device_names.get(device_type, device_type)
     
     await callback.message.edit_text(
-        "📄 <b>Выберите формат экспорта:</b>\n\n"
-        "• CSV - для таблиц и анализа\n"
-        "• Excel - с форматированием\n"
-        "• JSON - для программной обработки",
+        f"📱 <b>Выбрано:</b> {device_display}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"📄 <b>Выберите формат экспорта:</b>\n\n"
+        f"В каком формате сохранить данные?",
         reply_markup=get_export_formats_keyboard()
     )
+    
+    await state.set_state(ExportStates.selecting_format)
 
+
+# ============================================================================
+# 6. ВЫБОР ФОРМАТА И ЗАПУСК ЭКСПОРТА
+# ============================================================================
 
 @router.callback_query(F.data.startswith("export_format:"))
-async def select_format_and_export(callback: CallbackQuery, state: FSMContext):
+async def select_export_format(callback: CallbackQuery, state: FSMContext):
     """Выбор формата и запуск экспорта"""
     await callback.answer()
     
     export_format = callback.data.split(":", 1)[1]
-    
-    # Получаем все данные из state
-    user_data = await state.get_data()
-    host_id = user_data.get("selected_host_id")
-    export_type = user_data.get("export_type")
-    device_type = user_data.get("device_type")
-    
-    if not host_id or not export_type or not device_type:
-        await callback.answer("Ошибка: недостаточно данных", show_alert=True)
-        return
-    
     user_id = callback.from_user.id
     
-    logger.info(f"User {user_id} starting export: type={export_type}, device={device_type}, format={export_format}")
-    logger.info(f"Host ID: {host_id}")
-    
-    # Сохранение формата
     await state.update_data(export_format=export_format)
-    await state.set_state(ExportStates.exporting)
     
-    # Сообщение о начале экспорта
-    progress_msg = await callback.message.edit_text(
-        "⏳ <b>Начинаю экспорт данных...</b>\n\n"
-        "Это может занять некоторое время в зависимости от объема данных."
+    logger.info(f"👤 User {user_id} selected format: {export_format}")
+    
+    # Получаем все параметры экспорта
+    user_data = await state.get_data()
+    
+    export_type = user_data.get("export_type")
+    device_type = user_data.get("device_type")
+    date_from = user_data.get("date_from")
+    date_to = user_data.get("date_to")
+    host_id = user_data.get("selected_host_id")
+    
+    # Проверка наличия всех параметров
+    if not all([export_type, device_type, date_from, date_to, host_id]):
+        logger.error(f"Missing export parameters for user {user_id}")
+        logger.error(f"  export_type: {export_type}")
+        logger.error(f"  device_type: {device_type}")
+        logger.error(f"  date_from: {date_from}")
+        logger.error(f"  date_to: {date_to}")
+        logger.error(f"  host_id: {host_id}")
+        
+        await callback.message.edit_text(
+            "❌ <b>Ошибка:</b> Не все параметры заполнены\n\n"
+            "Пожалуйста, начните заново с выбора типа экспорта.",
+            reply_markup=get_back_button("back_to_host_info")
+        )
+        return
+    
+    # Красивое отображение параметров
+    format_names = {
+        "csv": "📄 CSV",
+        "xlsx": "📊 Excel (XLSX)",
+        "json": "📋 JSON"
+    }
+    
+    device_names = {
+        "ALL": "📱 Все устройства",
+        "DESKTOP": "💻 Десктоп",
+        "MOBILE": "📱 Мобильные",
+        "TABLET": "📲 Планшеты"
+    }
+    
+    type_names = {
+        "popular": "🔥 Популярные запросы",
+        "history": "📈 История запросов",
+        "history_all": "📊 Расширенная история",
+        "analytics": "🔬 Детальная аналитика",
+        "enhanced": "🚀 Расширенный экспорт",
+        "urls": "🔗 Экспорт URL"
+    }
+    
+    confirmation_text = (
+        "✅ <b>Параметры экспорта:</b>\n\n"
+        f"📊 Тип: {type_names.get(export_type, export_type)}\n"
+        f"📅 Период: <code>{date_from} — {date_to}</code>\n"
+        f"📱 Устройство: {device_names.get(device_type, device_type)}\n"
+        f"📄 Формат: {format_names.get(export_format, export_format.upper())}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🚀 <b>Начинаю создание экспорта...</b>\n"
+        f"⏳ Это может занять некоторое время"
     )
     
+    progress_msg = await callback.message.edit_text(confirmation_text)
+    
+    await state.set_state(ExportStates.exporting)
+    
+    logger.info("=" * 80)
+    logger.info(f"STARTING EXPORT FOR USER {user_id}")
+    logger.info(f"  Type: {export_type}")
+    logger.info(f"  Device: {device_type}")
+    logger.info(f"  Date range: {date_from} to {date_to}")
+    logger.info(f"  Format: {export_format}")
+    logger.info(f"  Host ID: {host_id}")
+    logger.info("=" * 80)
+    
+    # ЗАПУСК ЭКСПОРТА
     try:
-        # Получение информации о хосте
         api = YandexWebmasterAPI()
-        host = await api.get_host_info(host_id)
-        host_url = host.unicode_host_url or host.host_url
-        
-        # Создание записи в БД
-        export_record = Export(
-            user_id=user_id,
-            host_id=host_id,
-            host_url=host_url,
-            export_type=export_type,
-            export_format=export_format,
-            device_type=device_type,
-            status="processing"
-        )
-        
-        async with async_session_maker() as session:
-            session.add(export_record)
-            await session.commit()
-            await session.refresh(export_record)
-            export_id = export_record.id
-        
-        # Настройка дат (последние 30 дней по умолчанию)
-        date_to = datetime.now().date()
-        date_from = date_to - timedelta(days=30)
-        
-        # Создание сервиса экспорта
         export_service = ExportService(api)
         
-        # Функция обновления прогресса
-        async def update_progress(current: int, total: int, message: str = ""):
-            try:
-                progress_bar = create_progress_bar(current, total)
-                await progress_msg.edit_text(
-                    f"⏳ <b>Экспорт данных...</b>\n\n"
-                    f"{progress_bar}\n\n"
-                    f"Обработано: {format_number(current)} / {format_number(total)}\n"
-                    f"{message}"
-                )
-            except Exception:
-                pass
+        # Callback для обновления прогресса
+        last_update_time = [datetime.now()]
         
-        # Выполнение экспорта
-        logger.info(f"Executing export {export_id}")
+        async def update_progress(current: int, total: int, message: str):
+            """Обновление прогресса с throttling"""
+            try:
+                now = datetime.now()
+                if (now - last_update_time[0]).total_seconds() < 2:
+                    return
+                
+                last_update_time[0] = now
+                
+                percentage = (current / total * 100) if total > 0 else 0
+                
+                from utils.helpers import create_progress_bar
+                progress_bar = create_progress_bar(current, total, length=20)
+                
+                progress_text = (
+                    f"⏳ <b>Экспорт в процессе...</b>\n\n"
+                    f"{progress_bar}\n\n"
+                    f"📊 {message}\n"
+                    f"Прогресс: {current:,} / {total:,} ({percentage:.1f}%)\n\n"
+                    f"⚡ Пожалуйста, подождите...\n"
+                    f"<i>Не закрывайте чат</i>"
+                )
+                
+                await progress_msg.edit_text(progress_text)
+                logger.debug(f"Progress: {current}/{total} ({percentage:.1f}%)")
+                
+            except Exception as e:
+                logger.warning(f"Failed to update progress: {e}")
+        
+        # Создание экспорта
+        logger.info("🔄 Calling export_service.create_export()...")
         
         file_path = await export_service.create_export(
             host_id=host_id,
             export_type=export_type,
             device_type=device_type,
-            date_from=date_from.isoformat(),
-            date_to=date_to.isoformat(),
+            date_from=date_from,
+            date_to=date_to,
             export_format=export_format,
             progress_callback=update_progress
         )
         
-        # Получение размера файла
-        import os
-        file_size = os.path.getsize(file_path)
+        logger.info(f"✅ Export file created: {file_path}")
         
-        # Подсчет строк (для CSV)
-        rows_count = 0
-        if export_format == "csv":
-            with open(file_path, 'r', encoding='utf-8') as f:
-                rows_count = sum(1 for _ in f) - 1
+        # Проверка существования файла
+        if not Path(file_path).exists():
+            raise FileNotFoundError(f"Export file not found: {file_path}")
         
-        # Обновление записи в БД
-        async with async_session_maker() as session:
-            result = await session.get(Export, export_id)
-            if result:
-                result.status = "completed"
-                result.file_path = file_path
-                result.file_size = file_size
-                result.rows_exported = rows_count
-                result.completed_at = datetime.utcnow()
-                await session.commit()
+        file_size = Path(file_path).stat().st_size
+        logger.info(f"   File size: {file_size:,} bytes")
         
-        # Обновление статистики пользователя
-        from database.models import User
-        from sqlalchemy import update
-        async with async_session_maker() as session:
-            await session.execute(
-                update(User)
-                .where(User.id == user_id)
-                .values(total_exports=User.total_exports + 1)
-            )
-            await session.commit()
+        # Отправка файла пользователю
+        logger.info("📤 Sending file to user...")
         
-        # Отправка файла
-        logger.info(f"Sending export file to user {user_id}")
-        
-        file = FSInputFile(file_path)
-        
-        success_text = (
-            "✅ <b>Экспорт завершен!</b>\n\n"
-            f"📊 Тип: {export_type}\n"
-            f"📱 Устройства: {device_type}\n"
-            f"📄 Формат: {export_format.upper()}\n"
-            f"📁 Размер: {get_file_size_str(file_size)}\n"
-        )
-        
-        if rows_count:
-            success_text += f"📈 Строк: {format_number(rows_count)}\n"
-        
-        success_text += f"\n⏱ Период: {date_from.strftime('%d.%m.%Y')} - {date_to.strftime('%d.%m.%Y')}"
-        
-        await callback.message.answer(success_text)
-        
-        # Отправка файла
         await callback.message.answer_document(
-            file,
-            caption=f"📊 Экспорт для {host_url}"
+            document=FSInputFile(file_path),
+            caption=(
+                f"✅ <b>Экспорт завершен успешно!</b>\n\n"
+                f"📊 Тип: {type_names.get(export_type, export_type)}\n"
+                f"📅 Период: <code>{date_from} — {date_to}</code>\n"
+                f"📱 Устройство: {device_names.get(device_type, device_type)}\n"
+                f"📄 Формат: {format_names.get(export_format, export_format.upper())}\n\n"
+                f"💾 Размер файла: {file_size:,} байт\n\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"💡 Используйте <b>/hosts</b> для нового экспорта"
+            )
         )
         
-        # Удаление сообщения о прогрессе
         await progress_msg.delete()
+        await state.set_state(ExportStates.completed)
         
-        logger.info(f"✅ Export {export_id} completed successfully")
+        logger.info(f"✅ Export completed successfully for user {user_id}")
         
-        # Очистка состояния
-        await state.clear()
+    except FileNotFoundError as e:
+        logger.error(f"❌ Export file not found: {e}")
+        log_exception(logger, e, "export_file_not_found")
+        
+        await progress_msg.edit_text(
+            f"❌ <b>Ошибка: файл экспорта не найден</b>\n\n"
+            f"Возможно экспорт не содержит данных.\n\n"
+            f"Попробуйте:\n"
+            f"• Выбрать другой период\n"
+            f"• Изменить тип устройства\n"
+            f"• Использовать другой тип экспорта"
+        )
         
     except Exception as e:
         logger.error(f"❌ Export failed for user {user_id}")
-        log_exception(logger, e, "export")
+        log_exception(logger, e, "export_process")
         
-        # Обновление записи в БД
-        try:
-            async with async_session_maker() as session:
-                result = await session.get(Export, export_id)
-                if result:
-                    result.status = "failed"
-                    result.error_message = str(e)[:500]
-                    await session.commit()
-        except Exception:
-            pass
+        error_type = type(e).__name__
+        error_msg = str(e)[:300]
         
-        await callback.message.edit_text(
-            "❌ <b>Ошибка при экспорте данных</b>\n\n"
-            f"<code>{type(e).__name__}: {str(e)[:300]}</code>\n\n"
-            "Попробуйте позже или используйте /diagnose"
+        await progress_msg.edit_text(
+            f"❌ <b>Ошибка при создании экспорта</b>\n\n"
+            f"<b>Тип ошибки:</b> <code>{error_type}</code>\n"
+            f"<b>Сообщение:</b>\n<code>{error_msg}</code>\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"<b>Что делать:</b>\n"
+            f"1. Попробуйте другой период дат\n"
+            f"2. Выберите другой тип экспорта\n"
+            f"3. Используйте /diagnose для диагностики\n"
+            f"4. Проверьте логи в директории logs/\n\n"
+            f"💡 Если ошибка повторяется, свяжитесь с администратором"
         )
-        
-        await state.clear()
 
+
+# ============================================================================
+# 7. КНОПКИ НАВИГАЦИИ "НАЗАД"
+# ============================================================================
 
 @router.callback_query(F.data == "back_to_export_type")
 async def back_to_export_type(callback: CallbackQuery, state: FSMContext):
     """Вернуться к выбору типа экспорта"""
     await callback.answer()
-    await state.set_state(ExportStates.selecting_export_type)
+    logger.info(f"User {callback.from_user.id} going back to export type selection")
+    await export_start_handler(callback, state)
+
+
+@router.callback_query(F.data == "back_to_date_select")
+async def back_to_date_select(callback: CallbackQuery, state: FSMContext):
+    """Вернуться к выбору дат"""
+    await callback.answer()
+    
+    user_data = await state.get_data()
+    export_type = user_data.get("export_type")
+    
+    logger.info(f"User {callback.from_user.id} going back to date selection")
+    
+    if not export_type:
+        logger.warning("No export_type in state, redirecting to export type selection")
+        await export_start_handler(callback, state)
+        return
     
     await callback.message.edit_text(
-        "📊 <b>Выберите тип экспорта:</b>\n\n"
-        "• Популярные запросы - ТОП поисковых запросов\n"
-        "• История запросов - История с фильтрацией\n"
-        "• Расширенная история - Детальные данные\n"
-        "• Детальная аналитика - Полная аналитика\n"
-        "• Расширенный экспорт - Максимум информации",
-        reply_markup=get_export_types_keyboard()
+        f"📅 <b>Выберите период данных:</b>\n\n"
+        f"Выберите предустановленный период или укажите свой:",
+        reply_markup=get_date_range_keyboard()
     )
+    await state.set_state(ExportStates.selecting_date_range)
 
 
 @router.callback_query(F.data == "back_to_device_select")
 async def back_to_device_select(callback: CallbackQuery, state: FSMContext):
-    """Вернуться к выбору устройств"""
+    """Вернуться к выбору устройства"""
     await callback.answer()
-    await state.set_state(ExportStates.selecting_device)
+    
+    logger.info(f"User {callback.from_user.id} going back to device selection")
     
     await callback.message.edit_text(
-        "📱 <b>Выберите тип устройства:</b>\n\n"
-        "Для каких устройств выгрузить данные?",
+        f"📱 <b>Выберите тип устройства:</b>\n\n"
+        f"Для какого типа устройств выгрузить данные?",
         reply_markup=get_device_types_keyboard()
     )
-
-EOF
-
-echo "✅ Обработчики созданы (start.py, hosts.py, export.py)"
-
-# Продолжение следует...
-
-# ============================================================================
-# handlers/auth.py
-# ============================================================================
-cat > $PROJECT_NAME/handlers/auth.py <<'EOF'
-from aiogram import Router, F
-from aiogram.types import Message
-from aiogram.filters import Command
-
-from services.api import YandexWebmasterAPI, AuthenticationError
-from utils.logger import setup_logger, log_exception
-from config import YANDEX_ACCESS_TOKEN, API_BASE_URL
-
-router = Router()
-logger = setup_logger(__name__)
+    await state.set_state(ExportStates.selecting_device)
 
 
-@router.message(Command("auth"))
-@router.message(F.text == "🔐 Авторизация")
-async def show_auth_info(message: Message):
-    """Информация об авторизации"""
-    logger.info(f"👤 User {message.from_user.id} requested auth info")
+@router.callback_query(F.data == "export_help")
+async def show_export_help(callback: CallbackQuery):
+    """Показать подробную справку по типам экспорта"""
+    await callback.answer()
     
-    auth_text = (
-        "🔐 <b>Авторизация в Yandex Webmaster</b>\n\n"
-        
-        "Для работы бота необходим OAuth токен от Яндекса.\n\n"
-        
-        "<b>📝 Как получить токен:</b>\n"
-        "1. Перейдите на https://oauth.yandex.ru/\n"
-        "2. Нажмите 'Зарегистрировать приложение'\n"
-        "3. Выберите платформу 'Веб-сервисы'\n"
-        "4. В разделе 'Доступы' включите:\n"
-        "   <code>webmaster:read</code>\n"
-        "5. Получите OAuth токен\n"
-        "6. Добавьте токен в файл .env:\n"
-        "   <code>YANDEX_ACCESS_TOKEN=ваш_токен</code>\n"
-        "7. Перезапустите бота\n\n"
-        
-        "<b>⚠️ Важно:</b>\n"
-        "• Токен настраивается администратором\n"
-        "• Все пользователи используют один токен\n"
-        "• Токен дает доступ только к чтению данных\n\n"
-        
-        "<b>🔍 Проверка:</b>\n"
-        "Используйте команду /token для проверки токена\n\n"
-        
-        "📚 <b>Документация:</b>\n"
-        "https://yandex.ru/dev/webmaster/doc/ru/tasks/how-to-get-oauth"
+    help_text = """
+📚 <b>ТИПЫ ЭКСПОРТА - Подробное описание</b>
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+🔥 <b>ПОПУЛЯРНЫЕ ЗАПРОСЫ</b>
+<i>Самый простой и быстрый вариант</i>
+
+<b>Что получите:</b>
+- Список поисковых запросов по убыванию показов
+- Показы, клики, CTR
+- Средние позиции показа и клика
+- До 10,000 запросов за один экспорт
+
+<b>Когда использовать:</b>
+✅ Нужен быстрый список ТОП запросов
+✅ Хотите понять, по каким запросам вас находят
+✅ Анализ общей картины трафика
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+📈 <b>ИСТОРИЯ ЗАПРОСОВ</b>
+<i>Динамика изменений по ТОП-100 запросам</i>
+
+<b>Что получите:</b>
+- ТОП-100 самых популярных запросов
+- История показов/кликов по дням
+- Можно отследить тренды
+- Видно рост или падение по каждому запросу
+
+<b>Когда использовать:</b>
+✅ Нужно отследить динамику конкретных запросов
+✅ Анализ эффективности SEO работ
+✅ Понять, какие запросы растут/падают
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+📊 <b>РАСШИРЕННАЯ ИСТОРИЯ</b>
+<i>Общая статистика по ВСЕМ запросам</i>
+
+<b>Что получите:</b>
+- Суммарная статистика за каждый день
+- TOTAL показов/кликов по всему сайту
+- Не разбито по отдельным запросам
+- Компактный формат данных
+
+<b>Когда использовать:</b>
+✅ Нужна общая динамика трафика сайта
+✅ Анализ сезонности
+✅ Сравнение периодов (до/после изменений)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+🔬 <b>ДЕТАЛЬНАЯ АНАЛИТИКА</b>
+<i>Максимум информации + тренды</i>
+
+<b>Что получите:</b>
+- ТОП-200 запросов
+- Все стандартные метрики
+- + Расчет трендов в %
+- + Количество точек истории
+
+<b>Когда использовать:</b>
+✅ Глубокий анализ эффективности
+✅ Подготовка отчетов с трендами
+✅ Выявление перспективных запросов
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+🚀 <b>РАСШИРЕННЫЙ ЭКСПОРТ</b>
+<i>Максимум запросов с метаданными</i>
+
+<b>Что получите:</b>
+- До 1,000 запросов
+- Все метрики
+- + Временные метки экспорта
+- + Параметры устройств и периода
+
+<b>Когда использовать:</b>
+✅ Создание архива данных
+✅ Сравнение разных периодов/устройств
+✅ Экспорт в аналитические системы
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+🔗 <b>ЭКСПОРТ URL СТРАНИЦ</b>
+<i>Какие страницы показываются по запросам</i>
+
+<b>Что получите:</b>
+- Связку: ЗАПРОС → URL страницы
+- Показы и клики для каждой связки
+- Понимание, какая страница ранжируется
+- Выявление нецелевых страниц
+
+<b>Когда использовать:</b>
+✅ Аудит структуры сайта
+✅ Поиск каннибализации ключевых слов
+✅ Оптимизация посадочных страниц
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+💡 <b>ЧТО ВЫБРАТЬ?</b>
+
+<b>Для начала:</b> 🔥 Популярные запросы
+<b>Для SEO анализа:</b> 📈 История запросов
+<b>Для отчетов:</b> 📊 Расширенная история
+<b>Для глубокой аналитики:</b> 🔬 Детальная аналитика
+<b>Для архивов:</b> 🚀 Расширенный экспорт
+<b>Для аудита:</b> 🔗 Экспорт URL
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+<b>Все типы доступны в 3 форматах:</b>
+📄 CSV - для Excel/Google Sheets
+📊 XLSX - Excel с форматированием
+📋 JSON - для программ
+"""
+    
+    await callback.message.edit_text(
+        help_text,
+        reply_markup=get_back_button("back_to_export_type")
     )
-    
-    await message.answer(auth_text)
 
 
-@router.message(Command("token"))
-async def check_token(message: Message):
-    """Проверка токена с детальной диагностикой"""
-    logger.info(f"👤 User {message.from_user.id} checking token")
-    
-    check_msg = await message.answer("🔍 Проверка OAuth токена...")
-    
-    try:
-        api = YandexWebmasterAPI()
-        
-        logger.info("Testing API connection...")
-        is_valid = await api.test_connection()
-        
-        if is_valid:
-            user_info = await api.get_user_info()
-            
-            response_text = (
-                "✅ <b>Токен действителен!</b>\n\n"
-                f"<b>User ID:</b> <code>{user_info.get('user_id')}</code>\n"
-            )
-            
-            if user_info.get('email'):
-                response_text += f"<b>Email:</b> {user_info.get('email')}\n"
-            
-            response_text += "\n✅ Вы можете использовать все функции бота"
-            
-            logger.info(f"✅ Token valid for user {message.from_user.id}")
-            await check_msg.edit_text(response_text)
-        else:
-            raise Exception("Token validation failed")
-            
-    except AuthenticationError as e:
-        logger.error(f"❌ Authentication failed for user {message.from_user.id}")
-        logger.error(f"   {str(e)}")
-        
-        await check_msg.edit_text(
-            "❌ <b>Токен недействителен!</b>\n\n"
-            "<b>Ошибка аутентификации</b>\n\n"
-            "<b>Что делать:</b>\n"
-            "1. Проверьте YANDEX_ACCESS_TOKEN в .env\n"
-            "2. Убедитесь, что токен не истек\n"
-            "3. Проверьте права токена (webmaster:read)\n"
-            "4. Получите новый токен: /auth\n"
-            "5. Перезапустите бота после изменения .env\n\n"
-            "💡 Свяжитесь с администратором бота"
-        )
-        
-    except Exception as e:
-        logger.error(f"❌ Token check failed for user {message.from_user.id}")
-        log_exception(logger, e, "check_token")
-        
-        await check_msg.edit_text(
-            "❌ <b>Ошибка проверки токена!</b>\n\n"
-            f"<b>Тип ошибки:</b> {type(e).__name__}\n"
-            f"<b>Сообщение:</b>\n<code>{str(e)[:200]}</code>\n\n"
-            "<b>Возможные причины:</b>\n"
-            "• Проблемы с сетью\n"
-            "• API Яндекса недоступен\n"
-            "• Неверный формат токена\n\n"
-            "Попробуйте позже или используйте /diagnose"
-        )
+# ============================================================================
+# 8. ОТМЕНА ПРОЦЕССА
+# ============================================================================
 
+@router.callback_query(F.data == "cancel")
+async def cancel_export(callback: CallbackQuery, state: FSMContext):
+    """Отмена процесса экспорта"""
+    await callback.answer("Отменено")
+    
+    logger.info(f"User {callback.from_user.id} cancelled export process")
+    
+    await state.clear()
+    
+    await callback.message.edit_text(
+        "❌ <b>Процесс экспорта отменен</b>\n\n"
+        "Используйте /hosts для начала нового экспорта"
+    )
 
-@router.message(Command("diagnose"))
-async def diagnose_system(message: Message):
-    """Полная диагностика системы"""
-    logger.info(f"👤 User {message.from_user.id} requested system diagnostics")
-    
-    diag_msg = await message.answer("🔍 Запуск диагностики системы...")
-    
-    results = []
-    
-    # 1. Проверка конфигурации
-    try:
-        results.append("✅ Конфигурация загружена")
-        results.append(f"   API URL: {API_BASE_URL}")
-        results.append(f"   Token length: {len(YANDEX_ACCESS_TOKEN)} chars")
-    except Exception as e:
-        results.append(f"❌ Ошибка конфигурации: {e}")
-    
-    # 2. Проверка базы данных
-    try:
-        from database import async_session_maker
-        async with async_session_maker() as session:
-            from database.models import User
-            from sqlalchemy import select
-            result = await session.execute(select(User).limit(1))
-            results.append("✅ База данных доступна")
-    except Exception as e:
-        results.append(f"❌ Ошибка БД: {type(e).__name__}")
-    
-    # 3. Проверка API
-    try:
-        api = YandexWebmasterAPI()
-        is_valid = await api.test_connection()
-        if is_valid:
-            results.append("✅ Подключение к Yandex API")
-        else:
-            results.append("❌ API недоступен")
-    except Exception as e:
-        results.append(f"❌ Ошибка API: {type(e).__name__}")
-    
-    # 4. Проверка директорий
-    try:
-        from pathlib import Path
-        from config import EXPORTS_DIR, STATES_DIR, LOGS_DIR
-        
-        for dir_name, dir_path in [
-            ("Exports", EXPORTS_DIR),
-            ("States", STATES_DIR),
-            ("Logs", LOGS_DIR)
-        ]:
-            if Path(dir_path).exists():
-                results.append(f"✅ {dir_name}: {dir_path}")
-            else:
-                results.append(f"❌ Отсутствует {dir_name}")
-    except Exception as e:
-        results.append(f"❌ Ошибка проверки директорий")
-    
-    # Формирование отчета
-    report = "<b>🔍 Результаты диагностики:</b>\n\n" + "\n".join(results)
-    
-    await diag_msg.edit_text(report)
-    logger.info(f"✅ Diagnostics completed for user {message.from_user.id}")
 EOF
 
 # ============================================================================
@@ -2315,44 +2887,405 @@ EOF
 # ============================================================================
 cat > $PROJECT_NAME/services/api.py <<'EOF'
 
-async def get_search_queries_all_indicators(
-    self,
-    host_id: str,
-    date_from: str,
-    date_to: str,
-    device_type: str = "ALL",
-    limit: int = 500,
-    offset: int = 0
-) -> Dict:
+import aiohttp
+from typing import Dict, List, Optional, Any
+from datetime import datetime
+
+from config import (
+    YANDEX_ACCESS_TOKEN,
+    API_BASE_URL,
+    API_TIMEOUT,
+    MAX_RETRIES,
+    RETRY_DELAY
+)
+from utils.logger import setup_logger, log_exception
+
+logger = setup_logger(__name__)
+
+
+class AuthenticationError(Exception):
+    """Ошибка аутентификации"""
+    pass
+
+
+class APIError(Exception):
+    """Общая ошибка API"""
+    pass
+
+
+class HostInfo:
+    """Информация о хосте"""
+    
+    def __init__(self, data: Dict):
+        self.host_id = data.get("host_id", "")
+        self.host_url = data.get("host_url", "")
+        self.unicode_host_url = data.get("unicode_host_url", "")
+        self.verification_state = data.get("verification", {}).get("state", "")
+        self.verified = data.get("verified", False)
+        self.raw_data = data
+
+
+ALLOWED_QUERY_INDICATORS = [
+    "TOTAL_SHOWS",
+    "TOTAL_CLICKS",
+    "AVG_SHOW_POSITION",
+    "AVG_CLICK_POSITION",
+]
+
+
+class YandexWebmasterAPI:
+    """Клиент для работы с Yandex Webmaster API v4"""
+    
+    def __init__(self):
+        self.access_token = YANDEX_ACCESS_TOKEN
+        self.base_url = API_BASE_URL
+        self.timeout = API_TIMEOUT
+        self.max_retries = MAX_RETRIES
+        self.retry_delay = RETRY_DELAY
+        
+        self.headers = {
+            "Authorization": f"OAuth {self.access_token}",
+            "Content-Type": "application/json"
+        }
+        
+        logger.info(f"✅ YandexWebmasterAPI initialized")
+        logger.info(f"   Base URL: {self.base_url}")
+        logger.info(f"   Allowed indicators: {', '.join(ALLOWED_QUERY_INDICATORS)}")
+    
+    async def _make_request(
+        self,
+        method: str,
+        endpoint: str,
+        params: Optional[Dict] = None,
+        data: Optional[Dict] = None,
+        retry_count: int = 0
+    ) -> Dict:
+        """Выполнение HTTP запроса к API с улучшенной обработкой таймаутов"""
+        
+        url = f"{self.base_url}{endpoint}"
+        
+        logger.debug(f"Making {method} request to {endpoint}")
+        if params:
+            logger.debug(f"Params: {params}")
+        
+        try:
+            # ✅ УВЕЛИЧЕННЫЙ ТАЙМАУТ: разные для connect и total
+            timeout = aiohttp.ClientTimeout(
+                total=self.timeout,      # Общий таймаут (120 сек)
+                connect=30,               # Таймаут подключения (30 сек)
+                sock_connect=30,          # Таймаут socket (30 сек)
+                sock_read=self.timeout    # Таймаут чтения (120 сек)
+            )
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.request(
+                    method=method,
+                    url=url,
+                    headers=self.headers,
+                    params=params,
+                    json=data,
+                    timeout=timeout
+                ) as response:
+                    
+                    logger.debug(f"Response status: {response.status}")
+                    
+                    if response.status == 401:
+                        raise AuthenticationError("Invalid OAuth token")
+                    
+                    if response.status == 403:
+                        raise AuthenticationError("Access forbidden - check token permissions")
+                    
+                    if response.status == 404:
+                        raise APIError(f"Endpoint not found: {endpoint}")
+                    
+                    if response.status == 400:
+                        text = await response.text()
+                        logger.error(f"❌ API returned 400 Bad Request")
+                        logger.error(f"   Response body: {text}")
+                        raise APIError(f"API error {response.status}: {text[:500]}")
+                    
+                    if response.status >= 500:
+                        if retry_count < self.max_retries:
+                            logger.warning(f"Server error, retrying... ({retry_count + 1}/{self.max_retries})")
+                            import asyncio
+                            await asyncio.sleep(self.retry_delay)
+                            return await self._make_request(method, endpoint, params, data, retry_count + 1)
+                        raise APIError(f"Server error: {response.status}")
+                    
+                    if response.status != 200:
+                        text = await response.text()
+                        raise APIError(f"API error {response.status}: {text[:200]}")
+                    
+                    result = await response.json()
+                    return result
+        
+        # ✅ УЛУЧШЕННАЯ ОБРАБОТКА СЕТЕВЫХ ОШИБОК
+        except aiohttp.ClientConnectorError as e:
+            error_msg = str(e)
+            logger.error(f"❌ Connection error: {error_msg}")
+            
+            # Retry при таймауте или проблемах с подключением
+            if retry_count < self.max_retries:
+                logger.warning(f"🔄 Retrying connection... ({retry_count + 1}/{self.max_retries})")
+                import asyncio
+                await asyncio.sleep(self.retry_delay * (retry_count + 1))  # Увеличиваем задержку
+                return await self._make_request(method, endpoint, params, data, retry_count + 1)
+            
+            raise APIError(f"Network error after {self.max_retries} retries: {error_msg}")
+        
+        except asyncio.TimeoutError as e:
+            logger.error(f"❌ Timeout error after {self.timeout} seconds")
+            
+            # Retry при таймауте
+            if retry_count < self.max_retries:
+                logger.warning(f"🔄 Retrying after timeout... ({retry_count + 1}/{self.max_retries})")
+                import asyncio
+                await asyncio.sleep(self.retry_delay * (retry_count + 1))
+                return await self._make_request(method, endpoint, params, data, retry_count + 1)
+            
+            raise APIError(f"Timeout after {self.max_retries} retries")
+        
+        except aiohttp.ClientError as e:
+            logger.error(f"❌ HTTP client error: {type(e).__name__}: {str(e)}")
+            
+            # Retry при других клиентских ошибках
+            if retry_count < self.max_retries:
+                logger.warning(f"🔄 Retrying... ({retry_count + 1}/{self.max_retries})")
+                import asyncio
+                await asyncio.sleep(self.retry_delay)
+                return await self._make_request(method, endpoint, params, data, retry_count + 1)
+            
+            raise APIError(f"Network error after {self.max_retries} retries: {str(e)}")
+        
+        except Exception as e:
+            logger.error(f"❌ Unexpected error in API request")
+            log_exception(logger, e, "_make_request")
+            raise
+    
+        """
+    ДОБАВЬТЕ ЭТИ МЕТОДЫ В services/api.py
+    В класс YandexWebmasterAPI после существующих методов
     """
-    Получение поисковых запросов со всеми доступными индикаторами
-    Использует другой подход к запросу данных
-    """
-    
-    # Список всех возможных индикаторов согласно документации
-    query_indicators = [
-        "TOTAL_SHOWS",
-        "TOTAL_CLICKS", 
-        "AVG_SHOW_POSITION",
-        "AVG_CLICK_POSITION",
-        "CTR"
-    ]
-    
-    params = {
-        "date_from": date_from,
-        "date_to": date_to,
-        "device_type_indicator": device_type,
-        "limit": limit,
-        "offset": offset,
-        "query_indicator": query_indicators  # Явно запрашиваем индикаторы
-    }
-    
-    try:
-        # Получаем user_id
+
+    async def get_search_urls_in_search(
+        self,
+        host_id: str,
+        offset: int = 0,
+        limit: int = 100
+    ) -> Dict:
+        """
+        Получение примеров страниц в поиске
+        
+        Endpoint: /user/{user-id}/hosts/{host-id}/search-urls/in-search/samples
+        
+        Возвращает список URL страниц, которые находятся в поиске
+        
+        Returns:
+            {
+                "count": int,
+                "samples": [
+                    {
+                        "url": str,
+                        "last_access": str (datetime),
+                        "title": str
+                    }
+                ]
+            }
+        """
+        
+        logger.info(f"Fetching pages in search for host {host_id}")
+        
         user_data = await self._make_request("GET", "/user")
         user_id = user_data.get("user_id")
         
-        # Получаем запросы
+        params = {
+            "offset": offset,
+            "limit": min(limit, 100)
+        }
+        
+        logger.debug(f"Search URLs in-search params: {params}")
+        
+        data = await self._make_request(
+            "GET",
+            f"/user/{user_id}/hosts/{host_id}/search-urls/in-search/samples",
+            params=params
+        )
+        
+        return data
+
+
+    async def get_search_urls_events(
+        self,
+        host_id: str,
+        offset: int = 0,
+        limit: int = 100
+    ) -> Dict:
+        """
+        Получение событий со страницами (добавление/удаление из поиска)
+        
+        Endpoint: /user/{user-id}/hosts/{host-id}/search-urls/events/samples
+        
+        Возвращает список событий добавления/удаления страниц в/из поиска
+        
+        Returns:
+            {
+                "count": int,
+                "samples": [
+                    {
+                        "url": str,
+                        "title": str,
+                        "event_date": str (date),
+                        "last_access": str (datetime),
+                        "event_type": str (APPEARED | EXCLUDED),
+                        "excluded_reason": str (optional),
+                        "http_code": int (optional),
+                        "alternative_url": str (optional)
+                    }
+                ]
+            }
+        """
+        
+        logger.info(f"Fetching page events for host {host_id}")
+        
+        user_data = await self._make_request("GET", "/user")
+        user_id = user_data.get("user_id")
+        
+        params = {
+            "offset": offset,
+            "limit": min(limit, 100)
+        }
+        
+        logger.debug(f"Search URLs events params: {params}")
+        
+        data = await self._make_request(
+            "GET",
+            f"/user/{user_id}/hosts/{host_id}/search-urls/events/samples",
+            params=params
+        )
+        
+        return data
+
+
+    async def test_connection(self) -> bool:
+        """Проверка подключения к API"""
+        try:
+            await self._make_request("GET", "/user")
+            return True
+        except Exception as e:
+            logger.error(f"Connection test failed: {e}")
+            return False
+    
+    async def get_user_info(self) -> Dict:
+        """Получение информации о пользователе"""
+        return await self._make_request("GET", "/user")
+    
+    async def get_user_hosts(self) -> List[HostInfo]:
+        """Получение списка хостов пользователя"""
+        logger.info("Fetching user hosts...")
+        
+        user_data = await self._make_request("GET", "/user")
+        user_id = user_data.get("user_id")
+        
+        if not user_id:
+            raise APIError("Could not get user_id")
+        
+        response = await self._make_request("GET", f"/user/{user_id}/hosts")
+        
+        hosts_data = response.get("hosts", [])
+        logger.info(f"Found {len(hosts_data)} hosts")
+        
+        return [HostInfo(host) for host in hosts_data]
+    
+    async def get_host_info(self, host_id: str) -> HostInfo:
+        """Получение информации о конкретном хосте"""
+        logger.info(f"Fetching host info for {host_id}")
+        
+        user_data = await self._make_request("GET", "/user")
+        user_id = user_data.get("user_id")
+        
+        data = await self._make_request("GET", f"/user/{user_id}/hosts/{host_id}")
+        return HostInfo(data)
+    
+    async def get_host_summary(self, host_id: str) -> Optional[Any]:
+        """Получение сводной информации о хосте"""
+        logger.info(f"Fetching host summary for {host_id}")
+        
+        try:
+            user_data = await self._make_request("GET", "/user")
+            user_id = user_data.get("user_id")
+            
+            summary = await self._make_request("GET", f"/user/{user_id}/hosts/{host_id}/summary")
+            
+            class Summary:
+                def __init__(self, data: Dict):
+                    self.raw_data = data
+                    
+                    indexing = data.get("indexing_indicators", {})
+                    if indexing:
+                        self.indexing_indicators = type('obj', (object,), indexing)
+                    else:
+                        self.indexing_indicators = None
+                    
+                    search = data.get("search_queries_indicators", {})
+                    if search:
+                        self.search_query_indicators = type('obj', (object,), search)
+                    else:
+                        self.search_query_indicators = None
+                    
+                    links = data.get("links_indicators", {})
+                    if links:
+                        self.links_indicators = type('obj', (object,), links)
+                    else:
+                        self.links_indicators = None
+            
+            return Summary(summary)
+            
+        except Exception as e:
+            logger.warning(f"Could not fetch summary: {e}")
+            return None
+    
+    async def get_search_queries(
+        self,
+        host_id: str,
+        date_from: str,
+        date_to: str,
+        device_type: str = "ALL",
+        limit: int = 100,
+        offset: int = 0,
+        order_by: str = "TOTAL_SHOWS",
+        query_indicator: Optional[List[str]] = None
+    ) -> Dict:
+        """Получение популярных поисковых запросов"""
+        
+        logger.debug(f"Fetching search queries: offset={offset}, limit={limit}")
+        
+        user_data = await self._make_request("GET", "/user")
+        user_id = user_data.get("user_id")
+        
+        if query_indicator is None:
+            query_indicator = ALLOWED_QUERY_INDICATORS.copy()
+        else:
+            invalid = [ind for ind in query_indicator if ind not in ALLOWED_QUERY_INDICATORS]
+            if invalid:
+                logger.warning(f"⚠️ Removing invalid indicators: {invalid}")
+                query_indicator = [ind for ind in query_indicator if ind in ALLOWED_QUERY_INDICATORS]
+        
+        logger.info(f"📊 Using query indicators: {query_indicator}")
+        
+        params = {
+            "date_from": date_from,
+            "date_to": date_to,
+            "device_type_indicator": device_type,
+            "limit": limit,
+            "offset": offset,
+            "order_by": order_by
+        }
+        
+        if query_indicator:
+            params["query_indicator"] = query_indicator
+        
+        logger.debug(f"Request params: {params}")
+        
         data = await self._make_request(
             "GET",
             f"/user/{user_id}/hosts/{host_id}/search-queries/popular",
@@ -2361,10 +3294,133 @@ async def get_search_queries_all_indicators(
         
         return data
     
-    except Exception as e:
-        logger.error(f"Failed to get search queries with all indicators")
-        log_exception(logger, e, "get_search_queries_all_indicators")
-        raise
+    async def get_search_queries_history(
+        self,
+        host_id: str,
+        query_id: str,
+        date_from: str,
+        date_to: str,
+        device_type: str = "ALL",
+        query_indicators: Optional[List[str]] = None
+    ) -> Dict:
+        """Получение истории для конкретного поискового запроса"""
+        
+        logger.debug(f"Fetching history for query_id: {query_id[:50]}")
+        
+        user_data = await self._make_request("GET", "/user")
+        user_id = user_data.get("user_id")
+        
+        if query_indicators is None:
+            query_indicators = ALLOWED_QUERY_INDICATORS.copy()
+        else:
+            invalid = [ind for ind in query_indicators if ind not in ALLOWED_QUERY_INDICATORS]
+            if invalid:
+                logger.warning(f"⚠️ Removing invalid indicators: {invalid}")
+                query_indicators = [ind for ind in query_indicators if ind in ALLOWED_QUERY_INDICATORS]
+        
+        params = {
+            "date_from": date_from,
+            "date_to": date_to,
+            "device_type_indicator": device_type
+        }
+        
+        if query_indicators:
+            params["query_indicator"] = query_indicators
+        
+        logger.debug(f"History params: {params}")
+        
+        data = await self._make_request(
+            "GET",
+            f"/user/{user_id}/hosts/{host_id}/search-queries/{query_id}/history",
+            params=params
+        )
+        
+        return data
+    
+    async def get_search_queries_all_history(
+        self,
+        host_id: str,
+        date_from: str,
+        date_to: str,
+        device_type: str = "ALL",
+        query_indicator: Optional[List[str]] = None
+    ) -> Dict:
+        """Получение общей статистики для всех поисковых запросов"""
+        
+        logger.info(f"Fetching all queries history for period {date_from} to {date_to}")
+        
+        user_data = await self._make_request("GET", "/user")
+        user_id = user_data.get("user_id")
+        
+        if query_indicator is None:
+            query_indicator = ALLOWED_QUERY_INDICATORS.copy()
+        else:
+            invalid = [ind for ind in query_indicator if ind not in ALLOWED_QUERY_INDICATORS]
+            if invalid:
+                logger.warning(f"⚠️ Removing invalid indicators: {invalid}")
+                query_indicator = [ind for ind in query_indicator if ind in ALLOWED_QUERY_INDICATORS]
+        
+        params = {
+            "date_from": date_from,
+            "date_to": date_to,
+            "device_type_indicator": device_type
+        }
+        
+        if query_indicator:
+            params["query_indicator"] = query_indicator
+        
+        logger.debug(f"All history params: {params}")
+        
+        data = await self._make_request(
+            "GET",
+            f"/user/{user_id}/hosts/{host_id}/search-queries/all/history",
+            params=params
+        )
+        
+        return data
+    
+    async def get_search_urls(
+        self,
+        host_id: str,
+        query_id: str,
+        date_from: str,
+        date_to: str,
+        device_type: str = "ALL",
+        query_indicators: Optional[List[str]] = None
+    ) -> Dict:
+        """Получение списка URL для конкретного поискового запроса"""
+        
+        logger.debug(f"Fetching URLs for query_id: {query_id[:50]}")
+        
+        user_data = await self._make_request("GET", "/user")
+        user_id = user_data.get("user_id")
+        
+        if query_indicators is None:
+            query_indicators = ALLOWED_QUERY_INDICATORS.copy()
+        else:
+            invalid = [ind for ind in query_indicators if ind not in ALLOWED_QUERY_INDICATORS]
+            if invalid:
+                logger.warning(f"⚠️ Removing invalid indicators: {invalid}")
+                query_indicators = [ind for ind in query_indicators if ind in ALLOWED_QUERY_INDICATORS]
+        
+        params = {
+            "date_from": date_from,
+            "date_to": date_to,
+            "device_type_indicator": device_type
+        }
+        
+        if query_indicators:
+            params["query_indicator"] = query_indicators
+        
+        logger.debug(f"URLs params: {params}")
+        
+        data = await self._make_request(
+            "GET",
+            f"/user/{user_id}/hosts/{host_id}/search-queries/{query_id}/urls",
+            params=params
+        )
+        
+        return data
 
 EOF
 
@@ -2377,6 +3433,29 @@ echo "✅ Сервисы созданы (api.py - часть 1)"
 # ============================================================================
 cat > $PROJECT_NAME/services/export.py <<'EOF'
 
+"""
+services/export.py - ПОЛНОСТЬЮ ПЕРЕПИСАННАЯ ВЕРСИЯ v4.2 FINAL
+
+Сервис экспорта данных из Yandex Webmaster API
+
+ИЗМЕНЕНИЯ в v4.2 FINAL:
+- ✅ ИСПРАВЛЕНО: Корректная обработка page_events с правильными полями API
+- ✅ ИСПРАВЛЕНО: event_type теперь APPEARED/EXCLUDED вместо UNKNOWN
+- ✅ ИСПРАВЛЕНО: excluded_reason, http_code, alternative_url заполняются корректно
+- ✅ Оптимизирован порядок колонок для всех типов экспорта
+- ✅ Улучшена обработка индикаторов
+- ✅ Добавлена детальная статистика в логах
+- ✅ Улучшена обработка ошибок
+
+РЕАЛЬНАЯ СТРУКТУРА API page_events:
+{
+  "event": "APPEARED_IN_SEARCH",        <- не event_type
+  "excluded_url_status": "404 Error",   <- не excluded_reason
+  "bad_http_status": 404,               <- не http_code
+  "target_url": "https://..."           <- не alternative_url
+}
+"""
+
 import csv
 import json
 from pathlib import Path
@@ -2385,17 +3464,21 @@ from typing import List, Dict, Callable, Optional
 import asyncio
 
 from config import EXPORTS_DIR, MAX_EXPORT_ROWS, DEFAULT_PAGE_SIZE
-from services.api import YandexWebmasterAPI
+from services.api import YandexWebmasterAPI, ALLOWED_QUERY_INDICATORS
 from utils.logger import setup_logger, log_exception
 
 logger = setup_logger(__name__)
 
 
 class ExportService:
-    """Сервис для экспорта данных"""
+    """Сервис для экспорта данных из Yandex Webmaster API"""
     
     def __init__(self, api: YandexWebmasterAPI):
         self.api = api
+        logger.info("✅ ExportService initialized (v4.2 FINAL)")
+        logger.info(f"   Allowed indicators: {', '.join(ALLOWED_QUERY_INDICATORS)}")
+        logger.info(f"   Max export rows: {MAX_EXPORT_ROWS:,}")
+        logger.info(f"   Default page size: {DEFAULT_PAGE_SIZE}")
     
     async def create_export(
         self,
@@ -2407,106 +3490,155 @@ class ExportService:
         export_format: str = "csv",
         progress_callback: Optional[Callable] = None
     ) -> str:
-        """Создание экспорта"""
+        """
+        Создание экспорта данных
         
-        logger.info(f"Creating export: type={export_type}, device={device_type}, format={export_format}")
-        logger.info(f"Date range: {date_from} to {date_to}")
+        Args:
+            host_id: ID хоста
+            export_type: Тип экспорта (popular, history, history_all, analytics, enhanced, 
+                        pages_in_search, page_events)
+            device_type: Тип устройства (ALL, DESKTOP, MOBILE, TABLET)
+            date_from: Дата начала (YYYY-MM-DD)
+            date_to: Дата окончания (YYYY-MM-DD)
+            export_format: Формат файла (csv, xlsx, json)
+            progress_callback: Callback для обновления прогресса
+            
+        Returns:
+            str: Путь к созданному файлу
+        """
         
-        # Сбор данных
-        if export_type == "popular":
-            data = await self._export_popular_queries(
-                host_id, date_from, date_to, device_type, progress_callback
-            )
-        elif export_type == "history":
-            data = await self._export_history(
-                host_id, date_from, date_to, device_type, progress_callback
-            )
-        elif export_type == "history_all":
-            data = await self._export_history_all(
-                host_id, date_from, date_to, device_type, progress_callback
-            )
-        elif export_type == "analytics":
-            data = await self._export_analytics(
-                host_id, date_from, date_to, device_type, progress_callback
-            )
-        elif export_type == "enhanced":
-            data = await self._export_enhanced(
-                host_id, date_from, date_to, device_type, progress_callback
-            )
+        logger.info("=" * 80)
+        logger.info(f"🚀 STARTING EXPORT CREATION (v4.2 FINAL)")
+        logger.info("=" * 80)
+        logger.info(f"Export Type: {export_type}")
+        logger.info(f"Device Type: {device_type}")
+        logger.info(f"Format: {export_format}")
+        logger.info(f"Date Range: {date_from} to {date_to}")
+        logger.info(f"Host ID: {host_id}")
+        logger.info("=" * 80)
+        
+        # Маппинг типов экспорта на методы
+        export_methods = {
+            "popular": self._export_popular_queries,
+            "history": self._export_history,
+            "history_all": self._export_history_all,
+            "analytics": self._export_analytics,
+            "enhanced": self._export_enhanced,
+            "pages_in_search": self._export_pages_in_search,
+            "page_events": self._export_page_events
+        }
+        
+        if export_type not in export_methods:
+            raise ValueError(f"Unknown export type: {export_type}. Available: {list(export_methods.keys())}")
+        
+        # Получение данных
+        logger.info(f"📊 Calling export method: {export_type}")
+        data = await export_methods[export_type](
+            host_id, date_from, date_to, device_type, progress_callback
+        )
+        
+        if not data:
+            logger.warning("⚠️ No data collected for export")
         else:
-            raise ValueError(f"Unknown export type: {export_type}")
+            logger.info(f"✅ Data collected: {len(data):,} records")
         
-        # Создание файла
+        # Генерация имени файла
         filename = self._generate_filename(host_id, export_type, export_format)
         file_path = Path(EXPORTS_DIR) / filename
         
-        if export_format == "csv":
-            self._save_as_csv(data, file_path)
-        elif export_format == "xlsx":
-            self._save_as_xlsx(data, file_path)
-        elif export_format == "json":
-            self._save_as_json(data, file_path)
-        else:
-            raise ValueError(f"Unknown export format: {export_format}")
+        # Сохранение в файл
+        save_methods = {
+            "csv": self._save_as_csv,
+            "xlsx": self._save_as_xlsx,
+            "json": self._save_as_json
+        }
         
-        logger.info(f"Export saved: {file_path}")
+        if export_format not in save_methods:
+            raise ValueError(f"Unknown export format: {export_format}. Available: {list(save_methods.keys())}")
+        
+        logger.info(f"💾 Saving to {export_format.upper()}: {filename}")
+        save_methods[export_format](data, file_path, export_type)
+        
+        # Проверка результата
+        if not file_path.exists():
+            raise FileNotFoundError(f"Export file was not created: {file_path}")
+        
+        file_size = file_path.stat().st_size
+        
+        logger.info("=" * 80)
+        logger.info(f"✅ EXPORT COMPLETED SUCCESSFULLY")
+        logger.info("=" * 80)
+        logger.info(f"File: {file_path}")
+        logger.info(f"Size: {file_size:,} bytes")
+        logger.info(f"Records: {len(data):,}")
+        logger.info("=" * 80)
+        
         return str(file_path)
     
-    def _extract_indicators(self, query: Dict) -> Dict:
+    # =========================================================================
+    # ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ
+    # =========================================================================
+    
+    def _extract_indicators(self, query: Dict, debug: bool = False) -> Dict:
         """
-        Извлечение индикаторов из различных возможных структур ответа API
+        Извлечение индикаторов из объекта запроса
+        
+        Args:
+            query: Объект запроса от API
+            debug: Включить детальное логирование
+            
+        Returns:
+            Dict с извлеченными индикаторами
         """
         result = {}
+        query_text = query.get("query_text", "unknown")
         
-        # Вариант 1: indicators как объект
-        if "indicators" in query and isinstance(query["indicators"], dict):
-            indicators = query["indicators"]
-            logger.debug(f"Found indicators dict: {indicators}")
-            
-            # Прямые значения
-            for key in ["TOTAL_SHOWS", "TOTAL_CLICKS", "AVG_SHOW_POSITION", 
-                       "AVG_CLICK_POSITION", "CTR", "DEMAND"]:
-                if key in indicators:
-                    result[key] = indicators[key]
-            
-            # Вложенные объекты (если есть)
+        if debug:
+            logger.debug("🔍" * 40)
+            logger.debug(f"DEBUGGING QUERY: {query_text[:50]}")
+            logger.debug(f"Available fields: {list(query.keys())}")
+        
+        if "indicators" not in query:
+            if debug:
+                logger.warning(f"❌ NO 'indicators' field in query!")
+            return result
+        
+        indicators = query["indicators"]
+        
+        if debug:
+            logger.debug(f"📊 Found 'indicators' field, type: {type(indicators)}")
+        
+        if isinstance(indicators, dict):
             for key, value in indicators.items():
-                if isinstance(value, dict):
-                    for sub_key, sub_value in value.items():
-                        result[f"{key}_{sub_key}"] = sub_value
-        
-        # Вариант 2: indicators как массив
-        elif "indicators" in query and isinstance(query["indicators"], list):
-            indicators_list = query["indicators"]
-            logger.debug(f"Found indicators list with {len(indicators_list)} items")
-            
-            if indicators_list:
-                # Берем последний элемент (самые свежие данные)
-                latest = indicators_list[-1]
-                if isinstance(latest, dict):
-                    for key, value in latest.items():
-                        if key != "date":
-                            result[key] = value
-        
-        # Вариант 3: данные на верхнем уровне
+                if isinstance(value, (int, float)):
+                    result[key] = value
+                    if debug:
+                        logger.debug(f"   ✅ {key} = {value}")
         else:
-            logger.debug("No indicators field, checking top level")
-            for key in ["TOTAL_SHOWS", "TOTAL_CLICKS", "AVG_SHOW_POSITION",
-                       "AVG_CLICK_POSITION", "CTR", "DEMAND",
-                       "total_shows", "total_clicks", "avg_show_position",
-                       "avg_click_position", "ctr"]:
-                if key in query:
-                    result[key.upper()] = query[key]
+            logger.error(f"❌ Unexpected indicators type: {type(indicators)}")
         
-        # Логируем что нашли
-        if result:
-            logger.debug(f"Extracted indicators: {result}")
-        else:
-            logger.warning(f"No indicators extracted from query: {query.get('query_text', 'unknown')}")
-            # Логируем полную структуру для отладки
-            logger.debug(f"Full query structure: {json.dumps(query, ensure_ascii=False)[:500]}")
+        if not result and debug:
+            logger.warning(f"⚠️ NO indicators extracted for: {query_text[:50]}")
         
         return result
+    
+    def _generate_filename(self, host_id: str, export_type: str, export_format: str) -> str:
+        """Генерация имени файла для экспорта"""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        # Очистка host_id от спецсимволов
+        safe_host_id = (
+            host_id
+            .replace(":", "_")
+            .replace("/", "_")
+            .replace("https_", "")
+            .replace("http_", "")
+        )[:50]
+        
+        return f"export_{safe_host_id}_{export_type}_{timestamp}.{export_format}"
+    
+    # =========================================================================
+    # МЕТОДЫ ЭКСПОРТА ДАННЫХ
+    # =========================================================================
     
     async def _export_popular_queries(
         self,
@@ -2516,18 +3648,24 @@ class ExportService:
         device_type: str,
         progress_callback: Optional[Callable] = None
     ) -> List[Dict]:
-        """Экспорт популярных запросов с детальной диагностикой"""
+        """
+        Экспорт популярных поисковых запросов
+        
+        Самый простой и быстрый вариант.
+        Получает список ТОП запросов с показами, кликами, CTR и позициями.
+        """
+        
+        logger.info("🔥" * 40)
+        logger.info("STARTING POPULAR QUERIES EXPORT")
+        logger.info("🔥" * 40)
         
         all_queries = []
         offset = 0
         page_size = min(DEFAULT_PAGE_SIZE, 500)
         
-        logger.info(f"Starting popular queries export for host {host_id}")
-        logger.info(f"Parameters: date_from={date_from}, date_to={date_to}, device={device_type}")
-        
         while len(all_queries) < MAX_EXPORT_ROWS:
             try:
-                logger.info(f"Fetching page at offset {offset}, limit {page_size}")
+                logger.info(f"📥 Fetching queries: offset={offset}, limit={page_size}")
                 
                 result = await self.api.get_search_queries(
                     host_id=host_id,
@@ -2536,84 +3674,54 @@ class ExportService:
                     device_type=device_type,
                     limit=page_size,
                     offset=offset,
-                    order_by="TOTAL_SHOWS"
+                    order_by="TOTAL_SHOWS",
+                    query_indicator=ALLOWED_QUERY_INDICATORS.copy()
                 )
                 
-                # Детальное логирование ответа API
-                logger.info(f"API Response keys: {result.keys()}")
-                logger.info(f"Total count from API: {result.get('count', 0)}")
-                
                 queries = result.get("queries", [])
-                logger.info(f"Got {len(queries)} queries in this page")
                 
                 if not queries:
-                    logger.info("No more queries, breaking")
+                    logger.info("ℹ️ No more queries available")
                     break
                 
-                # Логируем структуру первого запроса для отладки
-                if queries and offset == 0:
-                    first_query = queries[0]
-                    logger.info("=" * 60)
-                    logger.info("FIRST QUERY STRUCTURE:")
-                    logger.info(json.dumps(first_query, ensure_ascii=False, indent=2))
-                    logger.info("=" * 60)
+                logger.info(f"✅ Got {len(queries)} queries")
                 
-                # Обработка каждого запроса
-                for idx, query in enumerate(queries):
+                for query in queries:
                     row = {
                         "query_id": query.get("query_id", ""),
                         "query_text": query.get("query_text", ""),
                     }
                     
-                    # Извлекаем индикаторы
+                    # Извлечение индикаторов
                     indicators = self._extract_indicators(query)
-                    
                     if indicators:
                         row.update(indicators)
-                    else:
-                        # Если индикаторов нет, пробуем альтернативные поля
-                        logger.warning(f"No indicators for query: {query.get('query_text')}")
-                        
-                        # Добавляем пустые поля
-                        row.update({
-                            "TOTAL_SHOWS": query.get("total_shows", 0),
-                            "TOTAL_CLICKS": query.get("total_clicks", 0),
-                            "AVG_SHOW_POSITION": query.get("avg_show_position", 0),
-                            "AVG_CLICK_POSITION": query.get("avg_click_position", 0),
-                            "CTR": query.get("ctr", 0)
-                        })
                     
                     all_queries.append(row)
                 
                 offset += len(queries)
                 
-                # Обновление прогресса
                 if progress_callback:
-                    total_found = result.get("count", len(all_queries))
                     await progress_callback(
                         len(all_queries),
-                        min(total_found, MAX_EXPORT_ROWS),
-                        f"Загружено запросов: {len(all_queries)}"
+                        min(result.get("count", 0), MAX_EXPORT_ROWS),
+                        f"Загружено запросов: {len(all_queries):,}"
                     )
                 
-                # Если получили все данные
+                # Если получили меньше чем запрашивали - это последняя страница
                 if len(queries) < page_size:
-                    logger.info("Received less than page_size, all data fetched")
+                    logger.info("✅ Last page reached")
                     break
                 
+                # Небольшая пауза между запросами
+                await asyncio.sleep(0.1)
+                
             except Exception as e:
-                logger.error(f"Error fetching popular queries at offset {offset}")
+                logger.error(f"❌ ERROR fetching queries at offset {offset}")
                 log_exception(logger, e, "_export_popular_queries")
                 break
         
-        logger.info(f"✅ Exported {len(all_queries)} popular queries")
-        
-        # Финальная проверка данных
-        non_zero_count = sum(1 for q in all_queries if any(
-            q.get(k, 0) != 0 for k in ["TOTAL_SHOWS", "TOTAL_CLICKS"]
-        ))
-        logger.info(f"Queries with non-zero data: {non_zero_count}/{len(all_queries)}")
-        
+        logger.info(f"✅ Popular queries export completed: {len(all_queries):,} records")
         return all_queries[:MAX_EXPORT_ROWS]
     
     async def _export_history(
@@ -2624,11 +3732,19 @@ class ExportService:
         device_type: str,
         progress_callback: Optional[Callable] = None
     ) -> List[Dict]:
-        """Экспорт истории запросов"""
+        """
+        История поисковых запросов
         
-        logger.info("Starting history export...")
+        Динамика изменений по ТОП-100 запросам.
+        Для каждого запроса получает историю показов/кликов по дням.
+        """
         
-        # Сначала получаем топ-100 популярных запросов
+        logger.info("📈" * 40)
+        logger.info("STARTING HISTORY EXPORT")
+        logger.info("📈" * 40)
+        
+        # Сначала получаем ТОП-100 запросов
+        logger.info("📊 Step 1: Fetching top 100 queries...")
         result = await self.api.get_search_queries(
             host_id=host_id,
             date_from=date_from,
@@ -2636,76 +3752,85 @@ class ExportService:
             device_type=device_type,
             limit=100,
             offset=0,
-            order_by="TOTAL_SHOWS"
+            order_by="TOTAL_SHOWS",
+            query_indicator=ALLOWED_QUERY_INDICATORS.copy()
         )
         
         top_queries = result.get("queries", [])
-        logger.info(f"Got {len(top_queries)} top queries for history")
+        logger.info(f"✅ Got {len(top_queries)} top queries")
         
-        # Для каждого запроса получаем историю
         history_data = []
         total_queries = len(top_queries)
         
+        logger.info("📊 Step 2: Fetching history for each query...")
+        
         for idx, query_data in enumerate(top_queries, 1):
             try:
-                query_text = query_data.get("query_text")
                 query_id = query_data.get("query_id")
+                query_text = query_data.get("query_text")
                 
-                if not query_text:
+                if not query_id:
+                    logger.warning(f"⚠️ Query without ID: {query_text}")
                     continue
                 
-                logger.debug(f"Fetching history for query: {query_text}")
+                logger.debug(f"Fetching history for query {idx}/{total_queries}: {query_text[:50]}")
                 
-                # Получаем историю для этого запроса
+                # Получаем историю для запроса
                 history = await self.api.get_search_queries_history(
                     host_id=host_id,
-                    query_indicator=query_text,
+                    query_id=query_id,
                     date_from=date_from,
                     date_to=date_to,
-                    device_type=device_type
+                    device_type=device_type,
+                    query_indicators=ALLOWED_QUERY_INDICATORS.copy()
                 )
                 
-                # Логируем структуру истории для первого запроса
-                if idx == 1:
-                    logger.info("=" * 60)
-                    logger.info("HISTORY STRUCTURE:")
-                    logger.info(json.dumps(history, ensure_ascii=False, indent=2)[:1000])
-                    logger.info("=" * 60)
-                
-                # Обработка точек истории
-                indicators_list = history.get("indicators", [])
-                logger.debug(f"Got {len(indicators_list)} history points for {query_text}")
-                
-                for point in indicators_list:
-                    row = {
-                        "query_id": query_id,
-                        "query_text": query_text,
-                        "date": point.get("date", ""),
-                    }
+                # Обработка истории
+                if "indicators" in history:
+                    indicators_obj = history["indicators"]
                     
-                    # Извлекаем indicators для каждой даты
-                    point_indicators = self._extract_indicators(point)
-                    if point_indicators:
-                        row.update(point_indicators)
+                    # Собираем все даты
+                    all_dates = set()
+                    for indicator_name, values_list in indicators_obj.items():
+                        if isinstance(values_list, list):
+                            for point in values_list:
+                                if isinstance(point, dict) and "date" in point:
+                                    date_str = point["date"][:10]
+                                    all_dates.add(date_str)
                     
-                    history_data.append(row)
+                    # Создаем строку для каждой даты
+                    for date_str in sorted(all_dates):
+                        row = {
+                            "query_id": query_id,
+                            "query_text": query_text,
+                            "date": date_str
+                        }
+                        
+                        # Добавляем значения индикаторов для этой даты
+                        for indicator_name, values_list in indicators_obj.items():
+                            if isinstance(values_list, list):
+                                for point in values_list:
+                                    if isinstance(point, dict) and point.get("date", "")[:10] == date_str:
+                                        row[indicator_name] = point.get("value", 0)
+                                        break
+                        
+                        history_data.append(row)
                 
-                # Обновление прогресса
-                if progress_callback:
+                # Обновление прогресса каждые 5 запросов
+                if progress_callback and idx % 5 == 0:
                     await progress_callback(
                         idx,
                         total_queries,
                         f"Обработано запросов: {idx}/{total_queries}"
                     )
                 
-                # Задержка между запросами
                 await asyncio.sleep(0.1)
                 
             except Exception as e:
-                logger.warning(f"Error fetching history for query '{query_text}': {e}")
+                logger.warning(f"⚠️ Error fetching history for query {idx}: {e}")
                 continue
         
-        logger.info(f"✅ Exported {len(history_data)} history points")
+        logger.info(f"✅ History export completed: {len(history_data):,} data points")
         return history_data
     
     async def _export_history_all(
@@ -2716,70 +3841,63 @@ class ExportService:
         device_type: str,
         progress_callback: Optional[Callable] = None
     ) -> List[Dict]:
-        """Расширенная история запросов"""
+        """
+        Расширенная история запросов
         
-        # Используем тот же подход что и в history, но с большим количеством запросов
-        logger.info("Starting history_all export...")
+        Общая статистика по ВСЕМ запросам сайта.
+        Суммарные показы/клики за каждый день без разбивки по запросам.
+        """
         
-        result = await self.api.get_search_queries(
+        logger.info("📊" * 40)
+        logger.info("STARTING EXTENDED HISTORY EXPORT")
+        logger.info("📊" * 40)
+        
+        result = await self.api.get_search_queries_all_history(
             host_id=host_id,
             date_from=date_from,
             date_to=date_to,
             device_type=device_type,
-            limit=500,
-            offset=0,
-            order_by="TOTAL_SHOWS"
+            query_indicator=ALLOWED_QUERY_INDICATORS.copy()
         )
         
-        queries = result.get("queries", [])
         all_history = []
         
-        # Ограничиваем до 200 запросов для производительности
-        for idx, query_data in enumerate(queries[:200], 1):
-            try:
-                query_text = query_data.get("query_text")
-                query_id = query_data.get("query_id")
+        if "indicators" in result:
+            indicators_obj = result["indicators"]
+            
+            # Собираем все даты
+            all_dates = set()
+            for indicator_name, values_list in indicators_obj.items():
+                if isinstance(values_list, list):
+                    for point in values_list:
+                        if isinstance(point, dict) and "date" in point:
+                            date_str = point["date"][:10]
+                            all_dates.add(date_str)
+            
+            logger.info(f"📅 Found data for {len(all_dates)} dates")
+            
+            # Создаем строку для каждой даты
+            for date_str in sorted(all_dates):
+                row = {"date": date_str}
                 
-                if not query_text:
-                    continue
+                # Добавляем значения всех индикаторов
+                for indicator_name, values_list in indicators_obj.items():
+                    if isinstance(values_list, list):
+                        for point in values_list:
+                            if isinstance(point, dict) and point.get("date", "")[:10] == date_str:
+                                row[indicator_name] = point.get("value", 0)
+                                break
                 
-                history = await self.api.get_search_queries_history(
-                    host_id=host_id,
-                    query_indicator=query_text,
-                    date_from=date_from,
-                    date_to=date_to,
-                    device_type=device_type
+                all_history.append(row)
+            
+            if progress_callback:
+                await progress_callback(
+                    len(all_history),
+                    len(all_history),
+                    f"Обработано дат: {len(all_history)}"
                 )
-                
-                indicators_list = history.get("indicators", [])
-                
-                for point in indicators_list:
-                    row = {
-                        "query_id": query_id,
-                        "query_text": query_text,
-                        "date": point.get("date", ""),
-                    }
-                    
-                    point_indicators = self._extract_indicators(point)
-                    if point_indicators:
-                        row.update(point_indicators)
-                    
-                    all_history.append(row)
-                
-                if progress_callback and idx % 10 == 0:
-                    await progress_callback(
-                        idx,
-                        min(len(queries), 200),
-                        f"Обработано: {idx}"
-                    )
-                
-                await asyncio.sleep(0.05)
-                
-            except Exception as e:
-                logger.warning(f"Error in history_all: {e}")
-                continue
         
-        logger.info(f"✅ Exported {len(all_history)} history_all records")
+        logger.info(f"✅ Extended history completed: {len(all_history):,} data points")
         return all_history
     
     async def _export_analytics(
@@ -2790,10 +3908,19 @@ class ExportService:
         device_type: str,
         progress_callback: Optional[Callable] = None
     ) -> List[Dict]:
-        """Детальная аналитика"""
+        """
+        Детальная аналитика с трендами
         
-        logger.info("Starting analytics export...")
+        ТОП-200 запросов с расчетом трендов в %.
+        Максимум информации для глубокого анализа.
+        """
         
+        logger.info("🔬" * 40)
+        logger.info("STARTING ANALYTICS EXPORT")
+        logger.info("🔬" * 40)
+        
+        # Получаем ТОП-200 запросов
+        logger.info("📊 Fetching top 200 queries...")
         popular_result = await self.api.get_search_queries(
             host_id=host_id,
             date_from=date_from,
@@ -2801,69 +3928,77 @@ class ExportService:
             device_type=device_type,
             limit=200,
             offset=0,
-            order_by="TOTAL_SHOWS"
+            order_by="TOTAL_SHOWS",
+            query_indicator=ALLOWED_QUERY_INDICATORS.copy()
         )
         
         queries = popular_result.get("queries", [])
+        logger.info(f"✅ Got {len(queries)} queries")
+        
         analytics_data = []
+        
+        logger.info("📊 Calculating trends for each query...")
         
         for idx, query_data in enumerate(queries, 1):
             try:
                 query_text = query_data.get("query_text")
                 query_id = query_data.get("query_id")
                 
-                if not query_text:
+                if not query_text or not query_id:
                     continue
                 
+                # Базовые данные
                 row = {
                     "query_id": query_id,
                     "query_text": query_text,
                 }
                 
-                # Извлекаем индикаторы
+                # Добавляем основные индикаторы
                 indicators = self._extract_indicators(query_data)
                 if indicators:
                     row.update(indicators)
                 
-                # Получаем историю для трендов
+                # Пытаемся рассчитать тренды
                 try:
                     history = await self.api.get_search_queries_history(
                         host_id=host_id,
-                        query_indicator=query_text,
+                        query_id=query_id,
                         date_from=date_from,
                         date_to=date_to,
-                        device_type=device_type
+                        device_type=device_type,
+                        query_indicators=["TOTAL_SHOWS", "TOTAL_CLICKS"]
                     )
                     
-                    indicators_list = history.get("indicators", [])
-                    
-                    if len(indicators_list) >= 2:
-                        row["history_points"] = len(indicators_list)
+                    if "indicators" in history:
+                        indicators_obj = history["indicators"]
                         
-                        first_point = self._extract_indicators(indicators_list[0])
-                        last_point = self._extract_indicators(indicators_list[-1])
+                        # Расчет трендов для показов
+                        if "TOTAL_SHOWS" in indicators_obj:
+                            shows_list = indicators_obj["TOTAL_SHOWS"]
+                            if isinstance(shows_list, list) and len(shows_list) >= 2:
+                                row["history_points"] = len(shows_list)
+                                first_shows = shows_list[0].get("value", 0)
+                                last_shows = shows_list[-1].get("value", 0)
+                                if first_shows > 0:
+                                    trend = ((last_shows - first_shows) / first_shows) * 100
+                                    row["shows_trend_percent"] = round(trend, 2)
                         
-                        # Тренд показов
-                        first_shows = first_point.get("TOTAL_SHOWS", 0)
-                        last_shows = last_point.get("TOTAL_SHOWS", 0)
-                        
-                        if first_shows > 0:
-                            trend = ((last_shows - first_shows) / first_shows) * 100
-                            row["shows_trend_percent"] = round(trend, 2)
-                        
-                        # Тренд кликов
-                        first_clicks = first_point.get("TOTAL_CLICKS", 0)
-                        last_clicks = last_point.get("TOTAL_CLICKS", 0)
-                        
-                        if first_clicks > 0:
-                            trend = ((last_clicks - first_clicks) / first_clicks) * 100
-                            row["clicks_trend_percent"] = round(trend, 2)
+                        # Расчет трендов для кликов
+                        if "TOTAL_CLICKS" in indicators_obj:
+                            clicks_list = indicators_obj["TOTAL_CLICKS"]
+                            if isinstance(clicks_list, list) and len(clicks_list) >= 2:
+                                first_clicks = clicks_list[0].get("value", 0)
+                                last_clicks = clicks_list[-1].get("value", 0)
+                                if first_clicks > 0:
+                                    trend = ((last_clicks - first_clicks) / first_clicks) * 100
+                                    row["clicks_trend_percent"] = round(trend, 2)
                 
                 except Exception as e:
-                    logger.debug(f"Could not get history for analytics: {e}")
+                    logger.debug(f"Could not calculate trends for query {idx}: {e}")
                 
                 analytics_data.append(row)
                 
+                # Обновление прогресса
                 if progress_callback and idx % 10 == 0:
                     await progress_callback(
                         idx,
@@ -2874,10 +4009,10 @@ class ExportService:
                 await asyncio.sleep(0.05)
                 
             except Exception as e:
-                logger.warning(f"Error in analytics: {e}")
+                logger.warning(f"⚠️ Error processing query {idx}: {e}")
                 continue
         
-        logger.info(f"✅ Exported {len(analytics_data)} analytics records")
+        logger.info(f"✅ Analytics completed: {len(analytics_data):,} records")
         return analytics_data
     
     async def _export_enhanced(
@@ -2888,17 +4023,28 @@ class ExportService:
         device_type: str,
         progress_callback: Optional[Callable] = None
     ) -> List[Dict]:
-        """Расширенный экспорт"""
+        """
+        Расширенный экспорт
         
-        logger.info("Starting enhanced export...")
+        До 1,000 запросов с метаданными и временными метками.
+        Идеально для архивирования данных.
+        """
         
-        # Получаем максимум популярных запросов
+        logger.info("🚀" * 40)
+        logger.info("STARTING ENHANCED EXPORT")
+        logger.info("🚀" * 40)
+        
         all_queries = []
         offset = 0
         page_size = 500
+        max_queries = min(MAX_EXPORT_ROWS, 1000)
         
-        while len(all_queries) < min(MAX_EXPORT_ROWS, 1000):
+        logger.info(f"📊 Target: up to {max_queries:,} queries")
+        
+        while len(all_queries) < max_queries:
             try:
+                logger.info(f"📥 Fetching: offset={offset}, limit={page_size}")
+                
                 result = await self.api.get_search_queries(
                     host_id=host_id,
                     date_from=date_from,
@@ -2906,28 +4052,42 @@ class ExportService:
                     device_type=device_type,
                     limit=page_size,
                     offset=offset,
-                    order_by="TOTAL_SHOWS"
+                    order_by="TOTAL_SHOWS",
+                    query_indicator=ALLOWED_QUERY_INDICATORS.copy()
                 )
                 
                 queries = result.get("queries", [])
-                
                 if not queries:
+                    logger.info("ℹ️ No more queries available")
                     break
                 
+                logger.info(f"✅ Got {len(queries)} queries")
                 all_queries.extend(queries)
                 offset += len(queries)
                 
+                if progress_callback:
+                    await progress_callback(
+                        len(all_queries),
+                        max_queries,
+                        f"Загружено: {len(all_queries):,}/{max_queries:,}"
+                    )
+                
                 if len(queries) < page_size:
+                    logger.info("✅ Last page reached")
                     break
                 
+                await asyncio.sleep(0.1)
+                
             except Exception as e:
-                logger.error(f"Error fetching queries at offset {offset}")
+                logger.error(f"❌ Error at offset {offset}")
+                log_exception(logger, e, "_export_enhanced")
                 break
         
-        logger.info(f"Got {len(all_queries)} queries for enhanced export")
-        
-        # Обрабатываем каждый запрос
+        # Обработка данных с добавлением метаданных
         enhanced_data = []
+        export_timestamp = datetime.now().isoformat()
+        
+        logger.info("📊 Processing queries and adding metadata...")
         
         for idx, query_data in enumerate(all_queries, 1):
             try:
@@ -2943,110 +4103,518 @@ class ExportService:
                     "device_type": device_type,
                     "period_from": date_from,
                     "period_to": date_to,
+                    "export_timestamp": export_timestamp
                 }
                 
-                # Извлекаем индикаторы
+                # Добавляем индикаторы
                 indicators = self._extract_indicators(query_data)
                 if indicators:
                     row.update(indicators)
                 
                 enhanced_data.append(row)
                 
-                if progress_callback and idx % 50 == 0:
-                    await progress_callback(
-                        idx,
-                        len(all_queries),
-                        f"Обработано: {idx}/{len(all_queries)}"
-                    )
-                
             except Exception as e:
-                logger.warning(f"Error in enhanced export: {e}")
+                logger.warning(f"⚠️ Error processing query {idx}: {e}")
                 continue
         
-        logger.info(f"✅ Exported {len(enhanced_data)} enhanced records")
+        logger.info(f"✅ Enhanced export completed: {len(enhanced_data):,} records")
         return enhanced_data
     
-    def _generate_filename(self, host_id: str, export_type: str, export_format: str) -> str:
-        """Генерация имени файла"""
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        safe_host_id = host_id.replace(":", "_").replace("/", "_")[:50]
-        return f"export_{safe_host_id}_{export_type}_{timestamp}.{export_format}"
+    async def _export_pages_in_search(
+        self,
+        host_id: str,
+        date_from: str,
+        date_to: str,
+        device_type: str,
+        progress_callback: Optional[Callable] = None
+    ) -> List[Dict]:
+        """
+        Экспорт страниц в поиске
+        
+        Список URL страниц, которые находятся в индексе Yandex.
+        Полезно для аудита индексации.
+        """
+        
+        logger.info("🔗" * 40)
+        logger.info("STARTING PAGES IN SEARCH EXPORT")
+        logger.info("🔗" * 40)
+        logger.info(f"Host ID: {host_id}")
+        logger.info("🔗" * 40)
+        
+        all_pages = []
+        offset = 0
+        page_size = 100
+        
+        try:
+            while len(all_pages) < MAX_EXPORT_ROWS:
+                logger.info(f"📥 Fetching pages: offset={offset}, limit={page_size}")
+                
+                result = await self.api.get_search_urls_in_search(
+                    host_id=host_id,
+                    offset=offset,
+                    limit=page_size
+                )
+                
+                if not isinstance(result, dict):
+                    logger.error(f"❌ Unexpected API response type: {type(result)}")
+                    break
+                
+                total_count = result.get("count", 0)
+                samples = result.get("samples", [])
+                
+                logger.info(f"✅ Got {len(samples)} pages (total available: {total_count:,})")
+                
+                if not samples:
+                    logger.info("ℹ️ No more pages available")
+                    break
+                
+                # Обработка страниц
+                for sample in samples:
+                    page_data = {
+                        "url": sample.get("url", ""),
+                        "title": sample.get("title", ""),
+                        "last_access": sample.get("last_access", ""),
+                        "export_timestamp": datetime.now().isoformat()
+                    }
+                    all_pages.append(page_data)
+                
+                offset += len(samples)
+                
+                if progress_callback:
+                    await progress_callback(
+                        len(all_pages),
+                        min(total_count, MAX_EXPORT_ROWS),
+                        f"Загружено страниц: {len(all_pages):,}"
+                    )
+                
+                if len(samples) < page_size:
+                    logger.info("✅ Last page reached")
+                    break
+                
+                await asyncio.sleep(0.1)
+            
+            logger.info("=" * 80)
+            logger.info("PAGES IN SEARCH EXPORT COMPLETED")
+            logger.info("=" * 80)
+            logger.info(f"Total pages: {len(all_pages):,}")
+            logger.info("=" * 80)
+            
+        except Exception as e:
+            logger.error("❌ ERROR in pages export")
+            log_exception(logger, e, "_export_pages_in_search")
+            return []
+        
+        return all_pages[:MAX_EXPORT_ROWS]
     
-    def _save_as_csv(self, data: List[Dict], file_path: Path):
-        """Сохранение в CSV"""
+    async def _export_page_events(
+        self,
+        host_id: str,
+        date_from: str,
+        date_to: str,
+        device_type: str,
+        progress_callback: Optional[Callable] = None
+    ) -> List[Dict]:
+        """
+        Экспорт событий со страницами (ФИНАЛЬНАЯ ВЕРСИЯ v4.2.1)
+        
+        РЕАЛЬНАЯ СТРУКТУРА API (из документации):
+        {
+        "event": "APPEARED_IN_SEARCH" или "REMOVED_FROM_SEARCH",
+        "excluded_url_status": "NOTHING_FOUND" (для REMOVED),
+        "bad_http_status": 404 (для REMOVED),
+        "target_url": "https://..." (для REMOVED)
+        }
+        
+        Типы событий:
+        - APPEARED_IN_SEARCH → преобразуется в APPEARED
+        - REMOVED_FROM_SEARCH → преобразуется в EXCLUDED
+        """
+        
+        logger.info("📋" * 40)
+        logger.info("STARTING PAGE EVENTS EXPORT (v4.2.1)")
+        logger.info("📋" * 40)
+        logger.info(f"Host ID: {host_id}")
+        logger.info("📋" * 40)
+        
+        all_events = []
+        offset = 0
+        page_size = 100
+        
+        try:
+            while len(all_events) < MAX_EXPORT_ROWS:
+                logger.info(f"📥 Fetching events: offset={offset}, limit={page_size}")
+                
+                result = await self.api.get_search_urls_events(
+                    host_id=host_id,
+                    offset=offset,
+                    limit=page_size
+                )
+                
+                if not isinstance(result, dict):
+                    logger.error(f"❌ Unexpected API response type: {type(result)}")
+                    break
+                
+                total_count = result.get("count", 0)
+                samples = result.get("samples", [])
+                
+                logger.info(f"✅ Got {len(samples)} events (total available: {total_count:,})")
+                
+                if not samples:
+                    logger.info("ℹ️ No more events available")
+                    break
+                
+                # Обработка событий
+                for sample in samples:
+                    # 1. Тип события (поле "event")
+                    raw_event = sample.get("event", "UNKNOWN")
+                    
+                    # ✅ ИСПРАВЛЕНО: Правильные значения из документации
+                    if raw_event == "APPEARED_IN_SEARCH":
+                        event_type = "APPEARED"
+                    elif raw_event == "REMOVED_FROM_SEARCH":  # ✅ Правильное название!
+                        event_type = "EXCLUDED"
+                    else:
+                        event_type = raw_event  # На случай других значений
+                    
+                    # 2. Основные поля
+                    event_data = {
+                        "event_type": event_type,
+                        "event_type_raw": raw_event,
+                        "event_date": sample.get("event_date", ""),
+                        "url": sample.get("url", ""),
+                        "title": sample.get("title", ""),
+                        "last_access": sample.get("last_access", ""),
+                    }
+                    
+                    # 3. Опциональные поля (только для EXCLUDED/REMOVED)
+                    excluded_url_status = sample.get("excluded_url_status")
+                    bad_http_status = sample.get("bad_http_status")
+                    target_url = sample.get("target_url")
+                    
+                    # Добавляем поля с дружелюбными названиями
+                    if event_type == "EXCLUDED":
+                        event_data["excluded_reason"] = excluded_url_status or ""
+                        event_data["http_code"] = str(bad_http_status) if bad_http_status else ""
+                        event_data["alternative_url"] = target_url or ""
+                    else:
+                        # Для APPEARED - пустые значения
+                        event_data["excluded_reason"] = ""
+                        event_data["http_code"] = ""
+                        event_data["alternative_url"] = ""
+                    
+                    # Также сохраняем оригинальные поля
+                    event_data["excluded_url_status"] = excluded_url_status or ""
+                    event_data["bad_http_status"] = str(bad_http_status) if bad_http_status else ""
+                    event_data["target_url"] = target_url or ""
+                    
+                    # 4. Метаданные
+                    event_data["export_timestamp"] = datetime.now().isoformat()
+                    
+                    all_events.append(event_data)
+                
+                offset += len(samples)
+                
+                if progress_callback:
+                    await progress_callback(
+                        len(all_events),
+                        min(total_count, MAX_EXPORT_ROWS),
+                        f"Загружено событий: {len(all_events):,}"
+                    )
+                
+                if len(samples) < page_size:
+                    logger.info("✅ Last page reached")
+                    break
+                
+                await asyncio.sleep(0.1)
+            
+            logger.info("=" * 80)
+            logger.info("PAGE EVENTS EXPORT COMPLETED")
+            logger.info("=" * 80)
+            logger.info(f"Total events: {len(all_events):,}")
+            
+            # Статистика по типам событий
+            if len(all_events) > 0:
+                event_types_count = {}
+                excluded_with_data = 0
+                excluded_without_data = 0
+                
+                for event in all_events:
+                    event_type = event.get("event_type", "UNKNOWN")
+                    event_types_count[event_type] = event_types_count.get(event_type, 0) + 1
+                    
+                    if event_type == "EXCLUDED":
+                        if event.get("excluded_reason") or event.get("http_code"):
+                            excluded_with_data += 1
+                        else:
+                            excluded_without_data += 1
+                
+                logger.info("Event types breakdown:")
+                for event_type, count in sorted(event_types_count.items()):
+                    percentage = (count / len(all_events)) * 100
+                    logger.info(f"  {event_type}: {count:,} ({percentage:.1f}%)")
+                
+                if excluded_with_data > 0:
+                    logger.info(f"✅ EXCLUDED events with details: {excluded_with_data:,}")
+                
+                if excluded_without_data > 0:
+                    logger.warning(f"⚠️  EXCLUDED events without details: {excluded_without_data:,}")
+                
+                # Проверка на UNKNOWN
+                unknown_count = event_types_count.get("UNKNOWN", 0)
+                if unknown_count > 0:
+                    logger.warning(f"⚠️  {unknown_count} events with UNKNOWN type - check API response")
+            
+            logger.info("=" * 80)
+            
+        except Exception as e:
+            logger.error("❌ ERROR in page events export")
+            log_exception(logger, e, "_export_page_events")
+            return []
+        
+        return all_events[:MAX_EXPORT_ROWS]
+        
+    # =========================================================================
+    # МЕТОДЫ СОХРАНЕНИЯ
+    # =========================================================================
+    
+    def _save_as_csv(self, data: List[Dict], file_path: Path, export_type: str = ""):
+        """
+        Сохранение в CSV с оптимизированным порядком колонок (v4.2)
+        
+        Args:
+            data: Данные для сохранения
+            file_path: Путь к файлу
+            export_type: Тип экспорта (для оптимизации порядка колонок)
+        """
+        
+        logger.info(f"💾 Saving to CSV: {file_path.name}")
         
         if not data:
             with open(file_path, 'w', encoding='utf-8-sig', newline='') as f:
                 writer = csv.writer(f)
                 writer.writerow(["No data available"])
+            logger.warning("⚠️ Saved empty CSV file")
             return
         
+        # Собираем все ключи
         all_keys = set()
         for item in data:
             all_keys.update(item.keys())
         
-        priority_keys = ["query_id", "query_text", "date", "device_type", "period_from", "period_to",
-                        "TOTAL_SHOWS", "TOTAL_CLICKS", "CTR", "AVG_SHOW_POSITION", "AVG_CLICK_POSITION"]
-        fieldnames = [k for k in priority_keys if k in all_keys]
-        fieldnames.extend(sorted([k for k in all_keys if k not in priority_keys]))
+        # ✅ ОПТИМИЗАЦИЯ: Определяем оптимальный порядок колонок
         
+        # Определяем тип экспорта по ключам
+        is_page_events = "event_type" in all_keys and "event_date" in all_keys
+        is_pages_in_search = "url" in all_keys and "last_access" in all_keys and "event_type" not in all_keys
+        is_queries = "query_text" in all_keys or "query_id" in all_keys
+        
+        if is_page_events:
+            logger.info("   Export type: PAGE_EVENTS")
+            # ✅ ОБНОВЛЕННЫЙ порядок для событий страниц (v4.2)
+            priority_keys = [
+                # Первичные ключи
+                "event_type",               # Удобочитаемый тип (APPEARED/EXCLUDED)
+                "event_type_raw",           # Оригинальное значение API
+                "event_date",               # Дата события
+                
+                # Основная информация
+                "url",                      # URL страницы
+                "title",                    # Заголовок
+                "last_access",              # Последний доступ
+                
+                # Дружелюбные названия опциональных полей
+                "excluded_reason",          # = excluded_url_status
+                "http_code",                # = bad_http_status
+                "alternative_url",          # = target_url
+                
+                # Оригинальные поля API (для продвинутых пользователей)
+                "excluded_url_status",
+                "bad_http_status",
+                "target_url",
+                
+                # Метаданные
+                "export_timestamp"
+            ]
+            
+        elif is_pages_in_search:
+            logger.info("   Export type: PAGES_IN_SEARCH")
+            priority_keys = [
+                "url",
+                "title",
+                "last_access",
+                "export_timestamp"
+            ]
+            
+        elif is_queries:
+            logger.info("   Export type: QUERIES")
+            priority_keys = [
+                "query_id",
+                "query_text",
+                "date",
+                "device_type",
+                "period_from",
+                "period_to",
+                # Основные метрики
+                "TOTAL_SHOWS",
+                "TOTAL_CLICKS",
+                "CTR",
+                "AVG_SHOW_POSITION",
+                "AVG_CLICK_POSITION",
+                # Дополнительные метрики
+                "history_points",
+                "shows_trend_percent",
+                "clicks_trend_percent",
+                "export_timestamp"
+            ]
+            
+        else:
+            logger.info("   Export type: GENERIC")
+            priority_keys = []
+        
+        # Формируем финальный список колонок
+        fieldnames = [k for k in priority_keys if k in all_keys]
+        
+        # Добавляем остальные колонки в алфавитном порядке
+        remaining_keys = sorted([k for k in all_keys if k not in priority_keys])
+        fieldnames.extend(remaining_keys)
+        
+        # Сохраняем CSV
         with open(file_path, 'w', encoding='utf-8-sig', newline='') as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
             writer.writeheader()
             writer.writerows(data)
         
-        logger.info(f"Saved {len(data)} rows to CSV with {len(fieldnames)} columns")
+        logger.info(f"✅ CSV saved successfully")
+        logger.info(f"   Rows: {len(data):,}")
+        logger.info(f"   Columns: {len(fieldnames)}")
+        logger.info(f"   First 5 columns: {', '.join(fieldnames[:5])}")
+        
+        # Дополнительная статистика для page_events
+        if is_page_events:
+            appeared_count = sum(1 for row in data if row.get("event_type") == "APPEARED")
+            excluded_count = sum(1 for row in data if row.get("event_type") == "EXCLUDED")
+            other_count = len(data) - appeared_count - excluded_count
+            
+            logger.info(f"   Event types:")
+            if appeared_count > 0:
+                logger.info(f"     APPEARED: {appeared_count:,} ({appeared_count/len(data)*100:.1f}%)")
+            if excluded_count > 0:
+                logger.info(f"     EXCLUDED: {excluded_count:,} ({excluded_count/len(data)*100:.1f}%)")
+            if other_count > 0:
+                logger.info(f"     OTHER: {other_count:,} ({other_count/len(data)*100:.1f}%)")
+            
+            # Процент заполненности опциональных полей
+            if excluded_count > 0:
+                with_data = sum(
+                    1 for row in data 
+                    if row.get("event_type") == "EXCLUDED" 
+                    and (row.get("excluded_reason") or row.get("http_code"))
+                )
+                logger.info(f"   Optional fields filled: {with_data}/{excluded_count} EXCLUDED events ({with_data/excluded_count*100:.1f}%)")
     
-    def _save_as_xlsx(self, data: List[Dict], file_path: Path):
-        """Сохранение в Excel"""
+    def _save_as_xlsx(self, data: List[Dict], file_path: Path, export_type: str = ""):
+        """
+        Сохранение в Excel с форматированием и автофильтром (v4.2)
+        
+        Args:
+            data: Данные для сохранения
+            file_path: Путь к файлу
+            export_type: Тип экспорта
+        """
+        
+        logger.info(f"💾 Saving to Excel: {file_path.name}")
         
         try:
             import openpyxl
-            from openpyxl.styles import Font, Alignment, PatternFill
+            from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
             
             wb = openpyxl.Workbook()
             ws = wb.active
-            ws.title = "Export"
+            ws.title = "Export Data"
             
             if not data:
                 ws['A1'] = "No data available"
                 wb.save(file_path)
+                logger.warning("⚠️ Saved empty Excel file")
                 return
             
+            # Используем ту же логику порядка колонок как в CSV
             all_keys = set()
             for item in data:
                 all_keys.update(item.keys())
             
-            priority_keys = ["query_id", "query_text", "date", "device_type", "period_from", "period_to",
-                            "TOTAL_SHOWS", "TOTAL_CLICKS", "CTR", "AVG_SHOW_POSITION", "AVG_CLICK_POSITION"]
+            is_page_events = "event_type" in all_keys and "event_date" in all_keys
+            is_pages_in_search = "url" in all_keys and "last_access" in all_keys and "event_type" not in all_keys
+            is_queries = "query_text" in all_keys or "query_id" in all_keys
+            
+            if is_page_events:
+                priority_keys = [
+                    "event_type", "event_type_raw", "event_date",
+                    "url", "title", "last_access",
+                    "excluded_reason", "http_code", "alternative_url",
+                    "excluded_url_status", "bad_http_status", "target_url",
+                    "export_timestamp"
+                ]
+            elif is_pages_in_search:
+                priority_keys = ["url", "title", "last_access", "export_timestamp"]
+            elif is_queries:
+                priority_keys = [
+                    "query_id", "query_text", "date",
+                    "TOTAL_SHOWS", "TOTAL_CLICKS", "CTR",
+                    "AVG_SHOW_POSITION", "AVG_CLICK_POSITION",
+                    "history_points", "shows_trend_percent", "clicks_trend_percent"
+                ]
+            else:
+                priority_keys = []
+            
             headers = [k for k in priority_keys if k in all_keys]
             headers.extend(sorted([k for k in all_keys if k not in priority_keys]))
             
-            # Заголовки
+            # Стили
             header_fill = PatternFill(start_color="366092", end_color="366092", fill_type="solid")
-            header_font = Font(color="FFFFFF", bold=True)
+            api_fill = PatternFill(start_color="808080", end_color="808080", fill_type="solid")
+            header_font = Font(color="FFFFFF", bold=True, size=11)
+            api_font = Font(color="FFFFFF", bold=True, size=10, italic=True)
             
+            border = Border(
+                left=Side(style='thin'),
+                right=Side(style='thin'),
+                top=Side(style='thin'),
+                bottom=Side(style='thin')
+            )
+            
+            # Заголовки
             for col_idx, header in enumerate(headers, 1):
                 cell = ws.cell(row=1, column=col_idx, value=header)
-                cell.fill = header_fill
-                cell.font = header_font
+                
+                # Разный стиль для оригинальных полей API в page_events
+                if is_page_events and header in ["excluded_url_status", "bad_http_status", "target_url", "event_type_raw"]:
+                    cell.fill = api_fill
+                    cell.font = api_font
+                else:
+                    cell.fill = header_fill
+                    cell.font = header_font
+                
                 cell.alignment = Alignment(horizontal="center", vertical="center")
+                cell.border = border
             
             # Данные
             for row_idx, item in enumerate(data, 2):
                 for col_idx, key in enumerate(headers, 1):
                     value = item.get(key)
                     cell = ws.cell(row=row_idx, column=col_idx, value=value)
+                    cell.border = border
                     
+                    # Форматирование чисел
                     if isinstance(value, (int, float)) and not isinstance(value, bool):
                         if key in ["CTR", "ctr", "clicks_trend_percent", "shows_trend_percent"]:
-                            cell.number_format = '0.00'
+                            cell.number_format = '0.00"%"'
                         elif isinstance(value, float):
                             cell.number_format = '0.00'
                         else:
                             cell.number_format = '#,##0'
             
-            # Автоширина
+            # Авто-ширина колонок
             for column in ws.columns:
                 max_length = 0
                 column_letter = column[0].column_letter
@@ -3056,59 +4624,53 @@ class ExportService:
                 adjusted_width = min(max_length + 2, 50)
                 ws.column_dimensions[column_letter].width = adjusted_width
             
+            # Закрепление заголовка
             ws.freeze_panes = "A2"
+            
+            # Автофильтр
+            ws.auto_filter.ref = ws.dimensions
+            
             wb.save(file_path)
-            logger.info(f"Saved {len(data)} rows to Excel")
+            
+            logger.info(f"✅ Excel saved successfully")
+            logger.info(f"   Rows: {len(data):,}")
+            logger.info(f"   Columns: {len(headers)}")
+            logger.info(f"   Features: frozen header, auto-filter, formatted numbers")
             
         except ImportError:
-            logger.warning("openpyxl not available, falling back to CSV")
-            self._save_as_csv(data, file_path.with_suffix('.csv'))
+            logger.warning("⚠️ openpyxl not installed, falling back to CSV")
+            self._save_as_csv(data, file_path.with_suffix('.csv'), export_type)
     
-    def _save_as_json(self, data: List[Dict], file_path: Path):
-        """Сохранение в JSON"""
+    def _save_as_json(self, data: List[Dict], file_path: Path, export_type: str = ""):
+        """
+        Сохранение в JSON с метаданными
         
+        Args:
+            data: Данные для сохранения
+            file_path: Путь к файлу
+            export_type: Тип экспорта
+        """
+        
+        logger.info(f"💾 Saving to JSON: {file_path.name}")
+        
+        # Формируем выходную структуру
         output = {
-            "export_date": datetime.now().isoformat(),
-            "total_records": len(data),
+            "export_metadata": {
+                "export_date": datetime.now().isoformat(),
+                "export_type": export_type,
+                "total_records": len(data),
+                "version": "4.2"
+            },
             "data": data
         }
         
         with open(file_path, 'w', encoding='utf-8') as f:
             json.dump(output, f, ensure_ascii=False, indent=2)
         
-        logger.info(f"Saved {len(data)} items to JSON")
+        logger.info(f"✅ JSON saved successfully")
+        logger.info(f"   Records: {len(data):,}")
+        logger.info(f"   Format: UTF-8, indented")
 
-EOF
-
-echo "✅ Сервисы созданы полностью (api.py, export.py)"
-
-# ============================================================================
-# start.sh - Скрипт запуска
-# ============================================================================
-cat > $PROJECT_NAME/start.sh <<'EOF'
-#!/bin/bash
-
-echo "🤖 Starting Yandex Webmaster Bot..."
-
-# Проверка виртуального окружения
-if [ ! -d "venv" ]; then
-    echo "❌ Virtual environment not found!"
-    echo "Please run: python -m venv venv"
-    exit 1
-fi
-
-# Активация виртуального окружения
-source venv/bin/activate
-
-# Проверка .env
-if [ ! -f ".env" ]; then
-    echo "❌ .env file not found!"
-    echo "Please copy .env.example to .env and configure it"
-    exit 1
-fi
-
-# Запуск бота
-python bot.py
 EOF
 
 chmod +x $PROJECT_NAME/start.sh
