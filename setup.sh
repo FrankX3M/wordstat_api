@@ -929,6 +929,7 @@ from handlers.hosts import router as hosts_router
 from handlers.export import router as export_router
 from handlers.auth import router as auth_router
 from handlers.stats import router as stats_router
+from handlers.clean_param import router as clean_param_router
 
 logger = setup_logger(__name__)
 
@@ -1023,6 +1024,7 @@ async def main():
     dp.include_router(export_router)
     dp.include_router(auth_router)
     dp.include_router(stats_router)
+    dp.include_router(clean_param_router)
     
     # Регистрация startup/shutdown хуков
     dp.startup.register(on_startup)
@@ -1332,6 +1334,11 @@ def get_export_types_keyboard() -> InlineKeyboardMarkup:
     )
     
     builder.button(
+        text="🔧 Анализ Clean-param",
+        callback_data="clean_param_menu"
+    )
+
+    builder.button(
         text="❓ Что выбрать?",
         callback_data="export_help"
     )
@@ -1625,6 +1632,1153 @@ def log_exception(logger: logging.Logger, exception: Exception, context: str = "
     logger.error(f"Traceback:\n{error_trace}")
     logger.error(f"{'='*60}")
 EOF
+
+
+
+# ============================================================================
+# services/clean_param.py
+# ============================================================================
+cat > $PROJECT_NAME/services/clean_param.py <<'EOF'
+
+import re
+import asyncio
+import aiohttp
+from typing import List, Dict, Set, Optional, Tuple
+from urllib.parse import urlparse, parse_qs
+from collections import Counter
+
+from utils.logger import setup_logger, log_exception
+from services.api import YandexWebmasterAPI
+
+logger = setup_logger(__name__)
+
+
+class CleanParamService:
+    
+    def __init__(self, api: YandexWebmasterAPI):
+        self.api = api
+        logger.info("✅ CleanParamService initialized")
+    
+    async def analyze_site_params(
+        self,
+        host_id: str,
+        excluded_params: Optional[List[str]] = None,
+        progress_callback: Optional[callable] = None
+    ) -> Dict:
+        
+        if excluded_params is None:
+            excluded_params = []
+        
+        excluded_params_lower = [p.lower() for p in excluded_params]
+        
+        logger.info(f"🚀 Starting analysis for host: {host_id}")
+        logger.info(f"📝 Excluded parameters: {excluded_params}")
+        
+        try:
+            if progress_callback:
+                await progress_callback("🔍 Получение списка страниц из поиска...")
+            
+            pages = await self._fetch_all_pages_in_search(host_id, progress_callback)
+            total_urls = len(pages)
+            
+            logger.info(f"📊 Total URLs found: {total_urls}")
+            
+            if progress_callback:
+                await progress_callback(f"📊 Найдено страниц: {total_urls}")
+            
+            host_info = await self.api.get_host_info(host_id)
+            host_url = host_info.unicode_host_url or host_info.host_url
+            
+            if progress_callback:
+                await progress_callback("🔎 Извлечение GET-параметров...")
+            
+            params_counter = await self._extract_params_from_urls(pages)
+            all_params = list(params_counter.keys())
+            urls_with_params = sum(1 for url in pages if '?' in url)
+            
+            logger.info(f"📈 Found {len(all_params)} unique parameters")
+            logger.info(f"🔗 URLs with params: {urls_with_params}/{total_urls}")
+            
+            if progress_callback:
+                await progress_callback("📥 Получение robots.txt...")
+            
+            existing_clean_params = await self._fetch_clean_param_from_robots(host_url)
+            existing_params_lower = [p.lower() for p in existing_clean_params]
+            
+            logger.info(f"🤖 Existing clean-param entries: {len(existing_clean_params)}")
+            
+            if progress_callback:
+                await progress_callback("🔄 Анализ параметров...")
+            
+            new_params = []
+            existing_params_found = []
+            excluded_params_found = []
+            
+            for param in all_params:
+                param_lower = param.lower()
+                
+                if param_lower in excluded_params_lower:
+                    excluded_params_found.append(param)
+                elif param_lower in existing_params_lower:
+                    existing_params_found.append(param)
+                else:
+                    new_params.append(param)
+            
+            recommended_clean_param = self._format_clean_param_directive(
+                new_params,
+                host_url
+            )
+            
+            statistics = []
+            for param, count in params_counter.most_common():
+                param_lower = param.lower()
+                percentage = (count / total_urls) * 100
+                
+                if param_lower in excluded_params_lower:
+                    status = "excluded"
+                elif param_lower in existing_params_lower:
+                    status = "existing"
+                else:
+                    status = "new"
+                
+                statistics.append({
+                    "param": param,
+                    "count": count,
+                    "percentage": percentage,
+                    "status": status
+                })
+            
+            result = {
+                "host_url": host_url,
+                "total_urls": total_urls,
+                "urls_with_params": urls_with_params,
+                "all_params": all_params,
+                "params_counter": dict(params_counter),
+                "existing_clean_params": existing_clean_params,
+                "new_params": new_params,
+                "existing_params_found": existing_params_found,
+                "excluded_params": excluded_params_found,
+                "recommended_clean_param": recommended_clean_param,
+                "statistics": statistics
+            }
+            
+            logger.info(f"✅ Analysis completed successfully")
+            logger.info(f"   - Total parameters: {len(all_params)}")
+            logger.info(f"   - New parameters: {len(new_params)}")
+            logger.info(f"   - Existing: {len(existing_params_found)}")
+            logger.info(f"   - Excluded: {len(excluded_params_found)}")
+            
+            if progress_callback:
+                await progress_callback("✅ Анализ завершен!")
+            
+            return result
+            
+        except Exception as e:
+            log_exception(logger, e, "analyze_site_params")
+            raise
+    
+    async def _fetch_all_pages_in_search(
+        self,
+        host_id: str,
+        progress_callback: Optional[callable] = None,
+        max_pages: int = 10000
+    ) -> List[str]:
+        
+        all_urls = []
+        offset = 0
+        limit = 100
+        
+        logger.info(f"📥 Fetching pages from search index (max: {max_pages})")
+        
+        while len(all_urls) < max_pages:
+            try:
+                logger.debug(f"   Fetching batch: offset={offset}, limit={limit}")
+                
+                response = await self.api.get_search_urls_in_search(
+                    host_id=host_id,
+                    offset=offset,
+                    limit=limit
+                )
+                
+                if not response or "samples" not in response:
+                    logger.warning("⚠️ No more URLs in response")
+                    break
+                
+                samples = response["samples"]
+                
+                if not samples:
+                    logger.info("ℹ️ No more URLs available")
+                    break
+                
+                urls = [sample.get("url", "") for sample in samples if sample.get("url")]
+                all_urls.extend(urls)
+                
+                if progress_callback:
+                    await progress_callback(f"📥 Загружено страниц: {len(all_urls)}")
+                
+                logger.debug(f"   ✅ Batch fetched: {len(urls)} URLs (total: {len(all_urls)})")
+                
+                if len(samples) < limit:
+                    logger.info("ℹ️ Last batch received (less than limit)")
+                    break
+                
+                offset += limit
+                
+            except Exception as e:
+                log_exception(logger, e, f"_fetch_all_pages_in_search (offset={offset})")
+                break
+        
+        logger.info(f"✅ Total pages fetched: {len(all_urls)}")
+        return all_urls
+    
+    async def _extract_params_from_urls(self, urls: List[str]) -> Counter:
+        
+        params_counter = Counter()
+        
+        logger.info(f"🔎 Extracting GET parameters from {len(urls)} URLs")
+        
+        for url in urls:
+            if '?' not in url:
+                continue
+            
+            try:
+                parsed = urlparse(url)
+                query_params = parse_qs(parsed.query, keep_blank_values=True)
+                
+                for param_name in query_params.keys():
+                    params_counter[param_name] += 1
+                    
+            except Exception as e:
+                logger.debug(f"⚠️ Failed to parse URL: {url[:100]}... - {e}")
+                continue
+        
+        logger.info(f"✅ Extracted {len(params_counter)} unique parameters")
+        
+        return params_counter
+    
+    async def _fetch_clean_param_from_robots(
+        self,
+        host_url: str,
+        timeout: int = 30
+    ) -> List[str]:
+        
+        logger.info(f"🤖 Fetching robots.txt from {host_url}")
+        
+        parsed = urlparse(host_url)
+        robots_url = f"{parsed.scheme}://{parsed.netloc}/robots.txt"
+        
+        logger.debug(f"   Robots URL: {robots_url}")
+        
+        max_retries = 5
+        retry_delay = 10
+        
+        for attempt in range(1, max_retries + 1):
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(
+                        robots_url,
+                        timeout=aiohttp.ClientTimeout(total=timeout),
+                        headers={'User-Agent': 'Mozilla/5.0'}
+                    ) as response:
+                        
+                        if response.status == 404:
+                            logger.warning("⚠️ robots.txt not found (404)")
+                            return []
+                        
+                        if response.status != 200:
+                            logger.warning(f"⚠️ robots.txt returned status {response.status}")
+                            return []
+                        
+                        robots_content = await response.text()
+                        logger.info(f"✅ robots.txt fetched ({len(robots_content)} bytes)")
+                        
+                        clean_params = self._parse_clean_param_from_robots(robots_content)
+                        logger.info(f"✅ Found {len(clean_params)} clean-param entries")
+                        
+                        return clean_params
+                        
+            except aiohttp.ClientError as e:
+                logger.warning(f"⚠️ Attempt {attempt}/{max_retries} failed: {e}")
+                if attempt < max_retries:
+                    logger.info(f"⏳ Retrying in {retry_delay} seconds...")
+                    await asyncio.sleep(retry_delay)
+                else:
+                    logger.error(f"❌ All {max_retries} attempts failed")
+                    return []
+            except Exception as e:
+                log_exception(logger, e, "_fetch_clean_param_from_robots")
+                return []
+        
+        return []
+    
+    def _parse_clean_param_from_robots(self, robots_content: str) -> List[str]:
+        
+        clean_params = []
+        
+        pattern = r'Clean-param:\s*(\S+)(?:\s+/.*)?'
+        
+        for line in robots_content.split('\n'):
+            line = line.strip()
+            
+            match = re.match(pattern, line, re.IGNORECASE)
+            if match:
+                param_string = match.group(1)
+                
+                if '&' in param_string:
+                    params = param_string.split('&')
+                    clean_params.extend([p.strip() for p in params if p.strip()])
+                else:
+                    clean_params.append(param_string.strip())
+        
+        logger.debug(f"   Parsed parameters: {clean_params}")
+        
+        return clean_params
+    
+    def _format_clean_param_directive(
+        self,
+        params: List[str],
+        host_url: str
+    ) -> str:
+        
+        if not params:
+            return "# No parameters to add"
+        
+        parsed = urlparse(host_url)
+        domain = parsed.netloc
+        
+        lines = [
+            "# ============================================",
+            "# Clean-param directive (Yandex format)",
+            f"# Generated for: {domain}",
+            f"# Total parameters: {len(params)}",
+            "# ============================================",
+            ""
+        ]
+        
+        PREFIX = "Clean-param: "
+        MAX_LINE_LENGTH = 500
+        SEPARATOR = "&"
+        
+        available_length = MAX_LINE_LENGTH - len(PREFIX)
+        
+        directive_lines = []
+        current_line_params = []
+        current_length = 0
+        
+        for param in params:
+            param = param.strip().replace(" ", "")
+            
+            param_with_separator = param if not current_line_params else SEPARATOR + param
+            param_length = len(param_with_separator)
+            
+            if current_length + param_length <= available_length:
+                current_line_params.append(param)
+                current_length += param_length
+            else:
+                if current_line_params:
+                    directive_lines.append(PREFIX + SEPARATOR.join(current_line_params))
+                
+                current_line_params = [param]
+                current_length = len(param)
+        
+        if current_line_params:
+            directive_lines.append(PREFIX + SEPARATOR.join(current_line_params))
+        
+        lines.extend(directive_lines)
+        
+        lines.append("")
+        lines.append(f"# Total directive lines: {len(directive_lines)}")
+        lines.append("# ============================================")
+        
+        return "\n".join(lines)
+    
+    def generate_report(
+        self,
+        result: Dict,
+        excluded_params: Optional[List[str]] = None
+    ) -> str:
+        
+        if excluded_params is None:
+            excluded_params = []
+        
+        lines = [
+            "=" * 80,
+            "CLEAN-PARAM ANALYSIS REPORT",
+            "=" * 80,
+            "",
+            f"Site: {result['host_url']}",
+            f"Total URLs analyzed: {result['total_urls']}",
+            f"URLs with parameters: {result['urls_with_params']}",
+            "",
+            "=" * 80,
+            "SUMMARY",
+            "=" * 80,
+            "",
+            f"Total unique parameters: {len(result['all_params'])}",
+            f"  - New (need to add): {len(result['new_params'])}",
+            f"  - Existing (in robots.txt): {len(result['existing_params_found'])}",
+            f"  - Excluded (in your list): {len(result['excluded_params'])}",
+            "",
+        ]
+        
+        if result['new_params']:
+            lines.extend([
+                "=" * 80,
+                f"NEW PARAMETERS TO ADD ({len(result['new_params'])})",
+                "=" * 80,
+                ""
+            ])
+            
+            for param in result['new_params'][:20]:
+                count = result['params_counter'].get(param, 0)
+                percentage = (count / result['total_urls']) * 100
+                lines.append(f"  • {param} - found in {count} URLs ({percentage:.1f}%)")
+            
+            if len(result['new_params']) > 20:
+                lines.append(f"  ... and {len(result['new_params']) - 20} more")
+            
+            lines.append("")
+        
+        if result['existing_params_found']:
+            lines.extend([
+                "=" * 80,
+                f"EXISTING PARAMETERS ({len(result['existing_params_found'])})",
+                "=" * 80,
+                ""
+            ])
+            
+            for param in result['existing_params_found'][:10]:
+                count = result['params_counter'].get(param, 0)
+                percentage = (count / result['total_urls']) * 100
+                lines.append(f"  • {param} - found in {count} URLs ({percentage:.1f}%)")
+            
+            if len(result['existing_params_found']) > 10:
+                lines.append(f"  ... and {len(result['existing_params_found']) - 10} more")
+            
+            lines.append("")
+        
+        if result['excluded_params']:
+            lines.extend([
+                "=" * 80,
+                f"EXCLUDED PARAMETERS ({len(result['excluded_params'])})",
+                "=" * 80,
+                ""
+            ])
+            
+            for param in result['excluded_params']:
+                count = result['params_counter'].get(param, 0)
+                percentage = (count / result['total_urls']) * 100
+                lines.append(f"  • {param} - found in {count} URLs ({percentage:.1f}%)")
+            
+            lines.append("")
+        
+        lines.extend([
+            "=" * 80,
+            "RECOMMENDED CLEAN-PARAM DIRECTIVE",
+            "=" * 80,
+            "",
+            result['recommended_clean_param'],
+            "",
+            "=" * 80,
+            "TOP 20 MOST COMMON PARAMETERS",
+            "=" * 80,
+            ""
+        ])
+        
+        sorted_params = sorted(
+            result['params_counter'].items(),
+            key=lambda x: x[1],
+            reverse=True
+        )
+        
+        for param, count in sorted_params[:20]:
+            percentage = (count / result['total_urls']) * 100
+            
+            param_lower = param.lower()
+            excluded_params_lower = [p.lower() for p in excluded_params]
+            existing_params_lower = [p.lower() for p in result['existing_clean_params']]
+            
+            if param_lower in excluded_params_lower:
+                status = "[EXCLUDED]"
+            elif param_lower in existing_params_lower:
+                status = "[EXISTING]"
+            else:
+                status = "[NEW]"
+            
+            lines.append(f"  {status:12} {param:30} {count:6} URLs ({percentage:5.1f}%)")
+        
+        lines.extend([
+            "",
+            "=" * 80,
+            "END OF REPORT",
+            "=" * 80
+        ])
+        
+        return "\n".join(lines)
+    
+    def generate_csv_statistics(self, result: Dict) -> str:
+        
+        lines = [
+            "Parameter,Count,Percentage,Status"
+        ]
+        
+        for stat in result['statistics']:
+            param = stat['param']
+            count = stat['count']
+            percentage = stat['percentage']
+            status = stat['status']
+            
+            lines.append(f'"{param}",{count},{percentage:.2f},{status}')
+        
+        return "\n".join(lines)
+
+EOF
+
+# ============================================================================
+# handlers/clean_param.py
+# ============================================================================
+cat > $PROJECT_NAME/handlers/clean_param.py <<'EOF'
+
+#!/usr/bin/env python3
+"""
+handlers/clean_param.py - ИСПРАВЛЕННАЯ ВЕРСИЯ v2.1
+Исправлена проблема с запуском анализа при повторных нажатиях
+"""
+
+from aiogram import Router, F
+from aiogram.types import CallbackQuery, Message, FSInputFile
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from datetime import datetime
+from pathlib import Path
+from typing import Dict
+
+from keyboards.menu import get_back_button
+from services.clean_param import CleanParamService
+from services.api import YandexWebmasterAPI
+from utils.logger import setup_logger, log_exception
+from config import EXPORTS_DIR
+
+router = Router()
+logger = setup_logger(__name__)
+
+
+class CleanParamStates(StatesGroup):
+    setting_exclusions = State()
+    analyzing = State()
+    selecting_format = State()
+    completed = State()
+
+
+def get_clean_param_keyboard():
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    
+    builder = InlineKeyboardBuilder()
+    
+    builder.button(text="▶️ Запустить анализ", callback_data="clean_param_start")
+    builder.button(text="🚫 Настроить исключения", callback_data="clean_param_exclusions")
+    builder.button(text="❓ Справка", callback_data="clean_param_help")
+    builder.button(text="🔙 Назад к экспортам", callback_data="back_to_export_type")
+    
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def get_exclusions_keyboard(current_exclusions: list):
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    
+    builder = InlineKeyboardBuilder()
+    
+    if current_exclusions:
+        builder.button(text=f"✅ Текущие исключения ({len(current_exclusions)})", callback_data="show_exclusions")
+        builder.button(text="🗑️ Очистить все", callback_data="clear_exclusions")
+    
+    builder.button(text="✏️ Добавить исключения", callback_data="add_exclusions")
+    builder.button(text="💾 Сохранить и продолжить", callback_data="save_exclusions")
+    builder.button(text="🔙 Назад", callback_data="clean_param_menu")
+    
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def get_analysis_results_keyboard():
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    
+    builder = InlineKeyboardBuilder()
+    
+    builder.button(text="📊 Скачать полный отчет", callback_data="clean_param_export_report")
+    builder.button(text="📋 Скачать директиву clean-param", callback_data="clean_param_export_directive")
+    builder.button(text="📈 Экспорт статистики", callback_data="clean_param_export_stats")
+    builder.button(text="🔄 Повторить анализ", callback_data="clean_param_start")
+    builder.button(text="🔙 В главное меню", callback_data="back_to_host_info")
+    
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+@router.callback_query(F.data == "clean_param_menu")
+async def show_clean_param_menu(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    
+    user_id = callback.from_user.id
+    logger.info(f"👤 User {user_id} opened clean-param menu")
+    
+    user_data = await state.get_data()
+    exclusions = user_data.get("clean_param_exclusions", [])
+    
+    menu_text = (
+        "🔧 <b>АНАЛИЗ GET-ПАРАМЕТРОВ</b>\n\n"
+        "Этот инструмент поможет вам:\n"
+        "• Получить список всех GET-параметров на сайте\n"
+        "• Сравнить с текущими настройками clean-param\n"
+        "• Получить рекомендации по оптимизации robots.txt\n\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+    )
+    
+    if exclusions:
+        menu_text += (
+            f"🚫 <b>Исключения ({len(exclusions)}):</b>\n"
+            f"<code>{', '.join(exclusions)}</code>\n\n"
+            "Эти параметры будут исключены из анализа.\n\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+        )
+    else:
+        menu_text += (
+            "💡 <b>Совет:</b> Настройте исключения перед анализом\n"
+            "Например: page, sort, filter и т.д.\n\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+        )
+    
+    menu_text += "Выберите действие:"
+    
+    await callback.message.edit_text(menu_text, reply_markup=get_clean_param_keyboard())
+
+
+@router.callback_query(F.data == "clean_param_help")
+async def show_clean_param_help(callback: CallbackQuery):
+    await callback.answer()
+    
+    help_text = """
+📚 <b>СПРАВКА: CLEAN-PARAM</b>
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+<b>Что такое Clean-param?</b>
+
+Clean-param — это директива в robots.txt, которая указывает поисковым роботам игнорировать определенные GET-параметры в URL.
+
+<b>Зачем это нужно?</b>
+
+1. 📉 Уменьшение дублей в индексе
+2. ⚡ Ускорение индексации
+3. 🎯 Концентрация краулингового бюджета
+4. 📊 Более чистая аналитика
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+<b>Как работает анализ?</b>
+
+1️⃣ Собираем все URL из поиска Yandex
+2️⃣ Извлекаем GET-параметры из каждого URL
+3️⃣ Читаем текущий robots.txt
+4️⃣ Сравниваем найденные параметры с текущими
+5️⃣ Генерируем рекомендации
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+<b>Пример директивы:</b>
+
+<code>Clean-param: utm_source
+Clean-param: utm_medium
+Clean-param: utm_campaign</code>
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+<b>Исключения параметров</b>
+
+Некоторые параметры важны для работы сайта:
+- <code>page</code> — пагинация
+- <code>sort</code> — сортировка
+- <code>filter</code> — фильтры
+- <code>id</code> — идентификаторы
+
+Такие параметры нужно добавить в исключения.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+<b>💡 Рекомендации:</b>
+
+✅ Всегда проверяйте результаты вручную
+✅ Используйте исключения для важных параметров
+✅ Тестируйте изменения на тестовом окружении
+✅ Следите за индексацией после внедрения
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+<b>📖 Документация Yandex:</b>
+https://yandex.ru/support/webmaster/robots-txt/clean-param.html
+"""
+    
+    await callback.message.edit_text(help_text, reply_markup=get_back_button("clean_param_menu"), disable_web_page_preview=True)
+
+
+@router.callback_query(F.data == "clean_param_exclusions")
+async def manage_exclusions(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    
+    user_data = await state.get_data()
+    exclusions = user_data.get("clean_param_exclusions", [])
+    
+    exclusions_text = (
+        "🚫 <b>УПРАВЛЕНИЕ ИСКЛЮЧЕНИЯМИ</b>\n\n"
+        "Укажите GET-параметры, которые НЕ должны попасть в clean-param.\n\n"
+    )
+    
+    if exclusions:
+        exclusions_text += f"<b>Текущие исключения ({len(exclusions)}):</b>\n"
+        for idx, param in enumerate(exclusions, 1):
+            exclusions_text += f"{idx}. <code>{param}</code>\n"
+        exclusions_text += "\n"
+    else:
+        exclusions_text += (
+            "ℹ️ Список исключений пуст\n\n"
+            "<b>Рекомендуемые исключения:</b>\n"
+            "• <code>page</code> — пагинация\n"
+            "• <code>sort</code> — сортировка\n"
+            "• <code>filter</code> — фильтры\n"
+            "• <code>id</code> — идентификаторы товаров\n"
+            "• <code>category</code> — категории\n\n"
+        )
+    
+    exclusions_text += "Выберите действие:"
+    
+    await callback.message.edit_text(exclusions_text, reply_markup=get_exclusions_keyboard(exclusions))
+
+
+@router.callback_query(F.data == "add_exclusions")
+async def prompt_add_exclusions(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    
+    await callback.message.edit_text(
+        "✏️ <b>ДОБАВЛЕНИЕ ИСКЛЮЧЕНИЙ</b>\n\n"
+        "Введите параметры через запятую или пробел:\n\n"
+        "<b>Примеры:</b>\n"
+        "<code>page, sort, filter</code>\n"
+        "<code>utm_source utm_medium</code>\n\n"
+        "💡 Регистр не имеет значения"
+    )
+    
+    await state.set_state(CleanParamStates.setting_exclusions)
+
+
+@router.message(CleanParamStates.setting_exclusions)
+async def process_exclusions_input(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+    text = message.text.strip()
+    
+    logger.info(f"👤 User {user_id} adding exclusions: {text}")
+    
+    import re
+    params = re.split(r'[,;\s]+', text)
+    params = [p.strip().lower() for p in params if p.strip()]
+    
+    if not params:
+        await message.answer("❌ Не удалось распознать параметры\n\nПопробуйте еще раз:")
+        return
+    
+    user_data = await state.get_data()
+    current_exclusions = user_data.get("clean_param_exclusions", [])
+    
+    all_exclusions = list(set(current_exclusions + params))
+    
+    await state.update_data(clean_param_exclusions=all_exclusions)
+    
+    logger.info(f"✅ Updated exclusions: {all_exclusions}")
+    
+    await message.answer(
+        f"✅ <b>Исключения обновлены!</b>\n\n"
+        f"Добавлено параметров: {len(params)}\n"
+        f"Всего исключений: {len(all_exclusions)}\n\n"
+        f"<b>Список:</b>\n"
+        f"<code>{', '.join(all_exclusions)}</code>",
+        reply_markup=get_exclusions_keyboard(all_exclusions)
+    )
+    
+    await state.set_state(None)
+
+
+@router.callback_query(F.data == "show_exclusions")
+async def show_current_exclusions(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    
+    user_data = await state.get_data()
+    exclusions = user_data.get("clean_param_exclusions", [])
+    
+    if not exclusions:
+        await callback.answer("Список исключений пуст", show_alert=True)
+        return
+    
+    text = f"🚫 <b>ТЕКУЩИЕ ИСКЛЮЧЕНИЯ ({len(exclusions)})</b>\n\n"
+    
+    for idx, param in enumerate(sorted(exclusions), 1):
+        text += f"{idx:2d}. <code>{param}</code>\n"
+    
+    await callback.message.edit_text(text, reply_markup=get_exclusions_keyboard(exclusions))
+
+
+@router.callback_query(F.data == "clear_exclusions")
+async def clear_exclusions(callback: CallbackQuery, state: FSMContext):
+    await callback.answer("🗑️ Исключения очищены")
+    
+    await state.update_data(clean_param_exclusions=[])
+    
+    logger.info(f"User {callback.from_user.id} cleared exclusions")
+    
+    await manage_exclusions(callback, state)
+
+
+@router.callback_query(F.data == "save_exclusions")
+async def save_exclusions(callback: CallbackQuery, state: FSMContext):
+    await callback.answer("✅ Сохранено")
+    
+    await show_clean_param_menu(callback, state)
+
+
+@router.callback_query(F.data == "clean_param_start")
+async def start_clean_param_analysis(callback: CallbackQuery, state: FSMContext):
+    """
+    ✅ ИСПРАВЛЕНО: Правильная обработка запуска анализа
+    - Отвечаем на callback после всех проверок
+    - Используем try-except для редактирования сообщения
+    - Добавлена детальная диагностика
+    """
+    
+    user_id = callback.from_user.id
+    logger.info("=" * 80)
+    logger.info(f"🚀 STARTING CLEAN-PARAM ANALYSIS FOR USER {user_id}")
+    logger.info("=" * 80)
+    
+    user_data = await state.get_data()
+    host_id = user_data.get("selected_host_id")
+    host_url = user_data.get("selected_host_url", "Unknown")
+    exclusions = user_data.get("clean_param_exclusions", [])
+    
+    logger.info(f"   Host ID: {host_id}")
+    logger.info(f"   Host URL: {host_url}")
+    logger.info(f"   Exclusions: {len(exclusions)} params")
+    
+    if not host_id:
+        await callback.answer("❌ Хост не выбран", show_alert=True)
+        logger.error(f"❌ No host_id for user {user_id}")
+        return
+    
+    # ✅ Отвечаем на callback ПОСЛЕ проверок
+    await callback.answer()
+    logger.info("✅ Callback answered")
+    
+    # Показываем подтверждение
+    confirm_text = (
+        "🚀 <b>ЗАПУСК АНАЛИЗА</b>\n\n"
+        f"🌐 <b>Домен:</b> {host_url}\n\n"
+    )
+    
+    if exclusions:
+        confirm_text += (
+            f"🚫 <b>Исключения ({len(exclusions)}):</b>\n"
+            f"<code>{', '.join(exclusions)}</code>\n\n"
+        )
+    else:
+        confirm_text += "ℹ️ Исключения не настроены\n\n"
+    
+    confirm_text += (
+        "⏳ <b>Процесс может занять несколько минут</b>\n"
+        "Будут выполнены следующие действия:\n\n"
+        "1️⃣ Загрузка всех страниц из поиска\n"
+        "2️⃣ Анализ GET-параметров\n"
+        "3️⃣ Чтение robots.txt\n"
+        "4️⃣ Сравнение и генерация рекомендаций\n\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "⚡ Запускаю анализ..."
+    )
+    
+    # ✅ Используем try-except для безопасного редактирования
+    try:
+        progress_msg = await callback.message.edit_text(confirm_text)
+        logger.info("✅ Message edited successfully")
+    except Exception as e:
+        logger.warning(f"⚠️ Could not edit message: {e}")
+        logger.info("   Sending new message instead...")
+        progress_msg = await callback.message.answer(confirm_text)
+        logger.info("✅ New message sent")
+    
+    # ✅ Устанавливаем состояние
+    await state.set_state(CleanParamStates.analyzing)
+    logger.info("✅ State set to: analyzing")
+    
+    # ✅ НАЧИНАЕМ АНАЛИЗ
+    try:
+        logger.info("📊 Creating API and service instances...")
+        api = YandexWebmasterAPI()
+        clean_param_service = CleanParamService(api)
+        
+        last_update_time = [datetime.now()]
+        
+        async def update_progress(message: str):
+            """Callback для обновления прогресса"""
+            try:
+                now = datetime.now()
+                if (now - last_update_time[0]).total_seconds() < 2:
+                    return
+                
+                last_update_time[0] = now
+                
+                progress_text = (
+                    f"⏳ <b>Анализ в процессе...</b>\n\n"
+                    f"📊 {message}\n\n"
+                    f"⚡ Пожалуйста, подождите..."
+                )
+                
+                await progress_msg.edit_text(progress_text)
+                logger.debug(f"   Progress updated: {message}")
+                
+            except Exception as e:
+                logger.warning(f"Failed to update progress: {e}")
+        
+        logger.info("🔄 Calling analyze_site_params()...")
+        
+        analysis_result = await clean_param_service.analyze_site_params(
+            host_id=host_id,
+            excluded_params=exclusions,
+            progress_callback=update_progress
+        )
+        
+        logger.info("✅ Analysis completed!")
+        logger.info(f"   Total URLs: {analysis_result.get('total_urls', 0)}")
+        logger.info(f"   Total params: {len(analysis_result.get('all_params', []))}")
+        logger.info(f"   New params: {len(analysis_result.get('new_params', []))}")
+        
+        analysis_result['timestamp'] = datetime.now().isoformat()
+        
+        await state.update_data(clean_param_analysis=analysis_result)
+        
+        logger.info("✅ Results saved to state")
+        logger.info("📊 Showing results to user...")
+        
+        await show_analysis_results(callback, state, analysis_result)
+        
+        logger.info("=" * 80)
+        logger.info(f"✅ ANALYSIS COMPLETED SUCCESSFULLY FOR USER {user_id}")
+        logger.info("=" * 80)
+        
+    except Exception as e:
+        logger.error("=" * 80)
+        logger.error(f"❌ ANALYSIS FAILED FOR USER {user_id}")
+        logger.error("=" * 80)
+        log_exception(logger, e, "clean_param_analysis")
+        
+        await progress_msg.edit_text(
+            f"❌ <b>Ошибка при анализе</b>\n\n"
+            f"<code>{type(e).__name__}: {str(e)[:300]}</code>\n\n"
+            f"Попробуйте:\n"
+            f"1. Проверьте доступность сайта\n"
+            f"2. Убедитесь, что robots.txt доступен\n"
+            f"3. Используйте /diagnose для диагностики",
+            reply_markup=get_back_button("clean_param_menu")
+        )
+
+
+async def show_analysis_results(callback: CallbackQuery, state: FSMContext, result: Dict):
+    """Показ результатов анализа"""
+    
+    logger.info("📊 Formatting analysis results...")
+    
+    summary_text = (
+        "✅ <b>АНАЛИЗ ЗАВЕРШЕН</b>\n\n"
+        f"🌐 <b>Домен:</b> {result['host_url']}\n\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "📊 <b>СТАТИСТИКА:</b>\n"
+        f"• Всего страниц: {result['total_urls']:,}\n"
+        f"• С GET-параметрами: {result['urls_with_params']:,}\n"
+        f"• Уникальных параметров: {len(result['all_params'])}\n\n"
+        "📋 <b>ТЕКУЩИЕ НАСТРОЙКИ:</b>\n"
+        f"• В robots.txt: {len(result['existing_clean_params'])} параметров\n\n"
+        "❗ <b>НАЙДЕНО:</b>\n"
+        f"• Новых параметров: {len(result['new_params'])}\n\n"
+    )
+    
+    if result['excluded_params']:
+        summary_text += f"🚫 <b>ИСКЛЮЧЕНО:</b>\n• {len(result['excluded_params'])} параметров\n\n"
+    
+    summary_text += "━━━━━━━━━━━━━━━━━━━━\n\n"
+    
+    if result['new_params']:
+        summary_text += "<b>🔝 ТОП-5 новых параметров:</b>\n"
+        
+        top_new = sorted(result['new_params'], key=lambda x: result['params_counter'].get(x, 0), reverse=True)[:5]
+        
+        for idx, param in enumerate(top_new, 1):
+            count = result['params_counter'].get(param, 0)
+            summary_text += f"{idx}. <code>{param}</code> - {count:,} URL\n"
+        
+        summary_text += "\n"
+    else:
+        summary_text += "✅ Все параметры уже в robots.txt!\n\n"
+    
+    summary_text += (
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "💾 <b>Доступные действия:</b>\n"
+        "• Скачать полный отчет\n"
+        "• Скачать директиву clean-param\n"
+        "• Экспортировать статистику"
+    )
+    
+    await callback.message.edit_text(summary_text, reply_markup=get_analysis_results_keyboard())
+    
+    await state.set_state(CleanParamStates.completed)
+    
+    logger.info("✅ Results displayed to user")
+
+
+@router.callback_query(F.data == "clean_param_export_report")
+async def export_full_report(callback: CallbackQuery, state: FSMContext):
+    await callback.answer("📥 Генерирую отчет...")
+    
+    user_data = await state.get_data()
+    analysis_result = user_data.get("clean_param_analysis")
+    
+    if not analysis_result:
+        await callback.answer("❌ Данные анализа не найдены", show_alert=True)
+        return
+    
+    try:
+        api = YandexWebmasterAPI()
+        clean_param_service = CleanParamService(api)
+        
+        report_text = clean_param_service.generate_report(analysis_result)
+        
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        host_id = analysis_result['host_url'].replace('https://', '').replace('http://', '').replace('/', '_')
+        filename = f"clean_param_report_{host_id}_{timestamp}.txt"
+        filepath = Path(EXPORTS_DIR) / filename
+        
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.write(report_text)
+        
+        await callback.message.answer_document(
+            document=FSInputFile(filepath),
+            caption=(
+                "📊 <b>Полный отчет по анализу clean-param</b>\n\n"
+                f"🌐 Домен: {analysis_result['host_url']}\n"
+                f"📅 Дата: {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+            )
+        )
+        
+        logger.info(f"✅ Report exported: {filename}")
+        
+    except Exception as e:
+        logger.error("❌ Error exporting report")
+        log_exception(logger, e, "export_report")
+        await callback.answer("❌ Ошибка при создании отчета", show_alert=True)
+
+
+@router.callback_query(F.data == "clean_param_export_directive")
+async def export_directive(callback: CallbackQuery, state: FSMContext):
+    await callback.answer("📥 Генерирую директиву...")
+    
+    user_data = await state.get_data()
+    analysis_result = user_data.get("clean_param_analysis")
+    
+    if not analysis_result:
+        await callback.answer("❌ Данные анализа не найдены", show_alert=True)
+        return
+    
+    try:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        host_id = analysis_result['host_url'].replace('https://', '').replace('http://', '').replace('/', '_')
+        filename = f"clean_param_directive_{host_id}_{timestamp}.txt"
+        filepath = Path(EXPORTS_DIR) / filename
+        
+        directive_content = analysis_result['recommended_clean_param']
+        
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.write(directive_content)
+        
+        await callback.message.answer_document(
+            document=FSInputFile(filepath),
+            caption=(
+                "📋 <b>Директива Clean-param для robots.txt</b>\n\n"
+                f"🌐 Домен: {analysis_result['host_url']}\n"
+                f"📊 Параметров: {len(analysis_result['new_params'])}\n\n"
+                "💡 <b>Инструкция:</b>\n"
+                "1. Скачайте файл\n"
+                "2. Откройте robots.txt вашего сайта\n"
+                "3. Добавьте содержимое файла\n"
+                "4. Сохраните изменения\n"
+                "5. Проверьте в Яндекс.Вебмастере"
+            )
+        )
+        
+        logger.info(f"✅ Directive exported: {filename}")
+        
+    except Exception as e:
+        logger.error("❌ Error exporting directive")
+        log_exception(logger, e, "export_directive")
+        await callback.answer("❌ Ошибка при создании директивы", show_alert=True)
+
+
+@router.callback_query(F.data == "clean_param_export_stats")
+async def export_stats(callback: CallbackQuery, state: FSMContext):
+    await callback.answer("📥 Генерирую статистику...")
+    
+    user_data = await state.get_data()
+    analysis_result = user_data.get("clean_param_analysis")
+    
+    if not analysis_result:
+        await callback.answer("❌ Данные анализа не найдены", show_alert=True)
+        return
+    
+    try:
+        import csv
+        
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        host_id = analysis_result['host_url'].replace('https://', '').replace('http://', '').replace('/', '_')
+        filename = f"clean_param_stats_{host_id}_{timestamp}.csv"
+        filepath = Path(EXPORTS_DIR) / filename
+        
+        with open(filepath, 'w', encoding='utf-8-sig', newline='') as f:
+            if analysis_result['statistics']:
+                fieldnames = analysis_result['statistics'][0].keys()
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(analysis_result['statistics'])
+        
+        await callback.message.answer_document(
+            document=FSInputFile(filepath),
+            caption=(
+                "📈 <b>Статистика GET-параметров</b>\n\n"
+                f"🌐 Домен: {analysis_result['host_url']}\n"
+                f"📊 Всего параметров: {len(analysis_result['statistics'])}\n"
+                f"📅 Дата: {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+            )
+        )
+        
+        logger.info(f"✅ Stats exported: {filename}")
+        
+    except Exception as e:
+        logger.error("❌ Error exporting stats")
+        log_exception(logger, e, "export_stats")
+        await callback.answer("❌ Ошибка при создании статистики", show_alert=True)
+
+EOF
+
+
+
+
+
+
+
+
+
 
 # ============================================================================
 # utils/helpers.py
@@ -2802,6 +3956,16 @@ async def show_export_help(callback: CallbackQuery):
 📋 <b>СОБЫТИЯ СО СТРАНИЦАМИ</b>
 История добавления/удаления страниц из поиска.
 ⚠️ Не требует выбора дат - актуальные данные.
+
+
+<b>АНАЛИЗ CLEAN-PARAM</b>
+Специальный инструмент для оптимизации robots.txt:
+- Анализирует все GET-параметры на сайте
+- Сравнивает с текущими настройками clean-param
+- Генерирует рекомендации по улучшению
+- Поддерживает исключения важных параметров
+
+⚠️ Не требует выбора дат - анализирует актуальные данные
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
