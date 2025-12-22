@@ -4673,6 +4673,376 @@ class ExportService:
 
 EOF
 
+cat > $PROJECT_NAME/handlers/export.py <<'EOF'
+
+from aiogram import Router, F
+from aiogram.types import CallbackQuery, Message, FSInputFile
+from aiogram.fsm.context import FSMContext
+from datetime import datetime
+from pathlib import Path
+
+from keyboards.menu import (
+    get_export_types_keyboard,
+    get_date_range_keyboard,
+    get_device_types_keyboard,
+    get_export_formats_keyboard,
+    get_back_button,
+    get_continue_keyboard
+)
+from states.export import ExportStates
+from services.export import ExportService
+from services.api import YandexWebmasterAPI
+from utils.logger import setup_logger, log_exception
+from utils.helpers import validate_date_range, get_date_range_presets
+
+router = Router()
+logger = setup_logger(__name__)
+
+
+@router.callback_query(F.data == "export_start")
+async def export_start_handler(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    user_id = callback.from_user.id
+    logger.info(f"👤 User {user_id} started export")
+    
+    user_data = await state.get_data()
+    selected_host_id = user_data.get("selected_host_id")
+    
+    if not selected_host_id:
+        await callback.answer("❌ Хост не выбран", show_alert=True)
+        return
+    
+    await callback.message.edit_text(
+        "📊 <b>Выберите тип экспорта данных:</b>\n\n"
+        "💡 <i>Нажмите \"❓ Что выбрать?\" для описания всех типов</i>",
+        reply_markup=get_export_types_keyboard()
+    )
+    
+    await state.set_state(ExportStates.selecting_export_type)
+
+
+@router.callback_query(F.data.startswith("export_type:"))
+async def select_export_type(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    
+    export_type = callback.data.split(":", 1)[1]
+    user_id = callback.from_user.id
+    
+    logger.info(f"👤 User {user_id} selected export type: {export_type}")
+    
+    await state.update_data(export_type=export_type)
+    
+    if export_type in ["pages_in_search", "page_events"]:
+        await callback.message.edit_text(
+            f"🔗 <b>Тип экспорта:</b> {export_type}\n\n"
+            f"⚠️ Этот тип экспорта не требует выбора периода дат\n\n"
+            f"Нажмите <b>\"Продолжить\"</b> для настройки параметров.",
+            reply_markup=get_continue_keyboard()
+        )
+        return
+    
+    await callback.message.edit_text(
+        f"📅 <b>Выберите период данных:</b>\n\n"
+        f"Выберите предустановленный период или укажите свой:",
+        reply_markup=get_date_range_keyboard()
+    )
+    
+    await state.set_state(ExportStates.selecting_date_range)
+
+
+@router.callback_query(F.data == "continue_export")
+async def continue_export_handler(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    
+    # Для типов без дат используем текущую дату
+    today = datetime.now().date().isoformat()
+    await state.update_data(date_from=today, date_to=today)
+    
+    await callback.message.edit_text(
+        f"📱 <b>Выберите тип устройства:</b>",
+        reply_markup=get_device_types_keyboard()
+    )
+    
+    await state.set_state(ExportStates.selecting_device)
+
+
+@router.callback_query(F.data.startswith("date_range:"))
+async def select_date_range(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    
+    range_key = callback.data.split(":", 1)[1]
+    
+    if range_key == "custom":
+        await callback.message.edit_text(
+            "📅 <b>Укажите дату начала</b>\n\n"
+            "Формат: <code>YYYY-MM-DD</code>\n"
+            "Например: <code>2024-12-01</code>",
+            reply_markup=get_back_button("back_to_date_select")
+        )
+        await state.set_state(ExportStates.setting_date_from)
+        return
+    
+    presets = get_date_range_presets()
+    
+    if range_key not in presets:
+        await callback.answer("❌ Неизвестный период", show_alert=True)
+        return
+    
+    date_range = presets[range_key]
+    date_from = date_range["from"]
+    date_to = date_range["to"]
+    
+    await state.update_data(date_from=date_from, date_to=date_to)
+    
+    await callback.message.edit_text(
+        f"📅 <b>Выбран период:</b>\n{date_range['name']}\n<code>{date_from} — {date_to}</code>\n\n"
+        f"📱 <b>Выберите тип устройства:</b>",
+        reply_markup=get_device_types_keyboard()
+    )
+    
+    await state.set_state(ExportStates.selecting_device)
+
+
+@router.message(ExportStates.setting_date_from)
+async def process_date_from(message: Message, state: FSMContext):
+    date_from = message.text.strip()
+    
+    try:
+        datetime.strptime(date_from, "%Y-%m-%d")
+    except ValueError:
+        await message.answer("❌ Неверный формат даты! Используйте YYYY-MM-DD")
+        return
+    
+    await state.update_data(date_from=date_from)
+    
+    await message.answer(
+        f"✅ Дата начала: <code>{date_from}</code>\n\n"
+        f"📅 Теперь укажите дату окончания\n\n"
+        f"Формат: <code>YYYY-MM-DD</code>",
+        reply_markup=get_back_button("back_to_date_select")
+    )
+    
+    await state.set_state(ExportStates.setting_date_to)
+
+
+@router.message(ExportStates.setting_date_to)
+async def process_date_to(message: Message, state: FSMContext):
+    date_to = message.text.strip()
+    
+    try:
+        datetime.strptime(date_to, "%Y-%m-%d")
+    except ValueError:
+        await message.answer("❌ Неверный формат даты! Используйте YYYY-MM-DD")
+        return
+    
+    user_data = await state.get_data()
+    date_from = user_data.get("date_from")
+    
+    is_valid, error_msg = validate_date_range(date_from, date_to)
+    
+    if not is_valid:
+        await message.answer(f"❌ {error_msg}\n\nПопробуйте еще раз:")
+        return
+    
+    await state.update_data(date_to=date_to)
+    
+    await message.answer(
+        f"✅ Период: <code>{date_from} — {date_to}</code>\n\n"
+        f"📱 <b>Выберите тип устройства:</b>",
+        reply_markup=get_device_types_keyboard()
+    )
+    
+    await state.set_state(ExportStates.selecting_device)
+
+
+@router.callback_query(F.data.startswith("export_device:"))
+async def select_device_type(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    
+    device_type = callback.data.split(":", 1)[1]
+    await state.update_data(device_type=device_type)
+    
+    device_names = {
+        "ALL": "📱 Все устройства",
+        "DESKTOP": "💻 Десктоп",
+        "MOBILE": "📱 Мобильные",
+        "TABLET": "📲 Планшеты"
+    }
+    
+    await callback.message.edit_text(
+        f"📱 <b>Выбрано:</b> {device_names.get(device_type, device_type)}\n\n"
+        f"📄 <b>Выберите формат экспорта:</b>",
+        reply_markup=get_export_formats_keyboard()
+    )
+    
+    await state.set_state(ExportStates.selecting_format)
+
+
+@router.callback_query(F.data.startswith("export_format:"))
+async def select_export_format(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    
+    export_format = callback.data.split(":", 1)[1]
+    await state.update_data(export_format=export_format)
+    
+    user_data = await state.get_data()
+    
+    export_type = user_data.get("export_type")
+    device_type = user_data.get("device_type")
+    date_from = user_data.get("date_from")
+    date_to = user_data.get("date_to")
+    host_id = user_data.get("selected_host_id")
+    
+    if not all([export_type, device_type, date_from, date_to, host_id]):
+        await callback.message.edit_text(
+            "❌ Не все параметры заполнены\n\nНачните заново",
+            reply_markup=get_back_button("back_to_host_info")
+        )
+        return
+    
+    format_names = {"csv": "📄 CSV", "xlsx": "📊 Excel", "json": "📋 JSON"}
+    
+    progress_msg = await callback.message.edit_text(
+        f"✅ <b>Параметры экспорта:</b>\n\n"
+        f"📊 Тип: {export_type}\n"
+        f"📅 Период: {date_from} — {date_to}\n"
+        f"📱 Устройство: {device_type}\n"
+        f"📄 Формат: {format_names.get(export_format, export_format)}\n\n"
+        f"🚀 Начинаю экспорт..."
+    )
+    
+    await state.set_state(ExportStates.exporting)
+    
+    try:
+        api = YandexWebmasterAPI()
+        export_service = ExportService(api)
+        
+        async def update_progress(current: int, total: int, message: str):
+            try:
+                percentage = (current / total * 100) if total > 0 else 0
+                await progress_msg.edit_text(
+                    f"⏳ <b>Экспорт в процессе...</b>\n\n"
+                    f"Прогресс: {current:,} / {total:,} ({percentage:.1f}%)\n"
+                    f"{message}"
+                )
+            except:
+                pass
+        
+        file_path = await export_service.create_export(
+            host_id=host_id,
+            export_type=export_type,
+            device_type=device_type,
+            date_from=date_from,
+            date_to=date_to,
+            export_format=export_format,
+            progress_callback=update_progress
+        )
+        
+        if not Path(file_path).exists():
+            raise FileNotFoundError(f"File not found: {file_path}")
+        
+        file_size = Path(file_path).stat().st_size
+        
+        await callback.message.answer_document(
+            document=FSInputFile(file_path),
+            caption=(
+                f"✅ <b>Экспорт завершен!</b>\n\n"
+                f"📊 Тип: {export_type}\n"
+                f"📅 Период: {date_from} — {date_to}\n"
+                f"💾 Размер: {file_size:,} байт"
+            )
+        )
+        
+        await progress_msg.delete()
+        await state.set_state(ExportStates.completed)
+        
+    except Exception as e:
+        logger.error(f"❌ Export failed")
+        log_exception(logger, e, "export")
+        
+        await progress_msg.edit_text(
+            f"❌ <b>Ошибка при создании экспорта</b>\n\n"
+            f"<code>{type(e).__name__}: {str(e)[:300]}</code>"
+        )
+
+
+@router.callback_query(F.data == "back_to_export_type")
+async def back_to_export_type(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await export_start_handler(callback, state)
+
+
+@router.callback_query(F.data == "back_to_date_select")
+async def back_to_date_select(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    
+    await callback.message.edit_text(
+        f"📅 <b>Выберите период данных:</b>",
+        reply_markup=get_date_range_keyboard()
+    )
+    await state.set_state(ExportStates.selecting_date_range)
+
+
+@router.callback_query(F.data == "back_to_device_select")
+async def back_to_device_select(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    
+    await callback.message.edit_text(
+        f"📱 <b>Выберите тип устройства:</b>",
+        reply_markup=get_device_types_keyboard()
+    )
+    await state.set_state(ExportStates.selecting_device)
+
+
+@router.callback_query(F.data == "export_help")
+async def show_export_help(callback: CallbackQuery):
+    await callback.answer()
+    
+    help_text = """
+📚 <b>ТИПЫ ЭКСПОРТА</b>
+
+🔥 <b>Популярные запросы</b>
+Список ТОП запросов с показами, кликами, CTR и позициями.
+
+📈 <b>История запросов</b>
+Динамика изменений по ТОП-100 запросам за период.
+
+📊 <b>Расширенная история</b>
+Суммарная статистика по всему сайту за каждый день.
+
+🔬 <b>Детальная аналитика</b>
+ТОП-200 запросов с расчетом трендов в %.
+
+🚀 <b>Расширенный экспорт</b>
+До 1,000 запросов с метаданными.
+
+🔗 <b>Страницы в поиске</b>
+Список URL страниц в индексе Yandex.
+
+📋 <b>События со страницами</b>
+История добавления/удаления страниц из поиска.
+
+Все форматы: CSV, Excel, JSON
+"""
+    
+    await callback.message.edit_text(
+        help_text,
+        reply_markup=get_back_button("back_to_export_type")
+    )
+
+
+@router.callback_query(F.data == "cancel")
+async def cancel_export(callback: CallbackQuery, state: FSMContext):
+    await callback.answer("Отменено")
+    await state.clear()
+    
+    await callback.message.edit_text(
+        "❌ <b>Процесс экспорта отменен</b>\n\n"
+        "Используйте /hosts для начала нового экспорта"
+    )
+
+EOF
+
 chmod +x $PROJECT_NAME/start.sh
 
 # ============================================================================
