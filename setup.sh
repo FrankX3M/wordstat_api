@@ -24,6 +24,17 @@ TELEGRAM_BOT_TOKEN=YOUR_TELEGRAM_BOT_TOKEN
 # Yandex OAuth Token (https://oauth.yandex.ru/)
 YANDEX_ACCESS_TOKEN=YOUR_YANDEX_ACCESS_TOKEN
 
+# Настройка доступа, если пусто бот доступен всем
+
+# Один пользователь (личный бот)
+# ALLOWED_USER_IDS=123456789
+
+# Несколько пользователей (корпоративный бот)
+# ALLOWED_USER_IDS=123456789,987654321,555666777
+
+# Открытый доступ
+# ALLOWED_USER_IDS=
+
 # База данных (ВАЖНО: используйте sqlite+aiosqlite для асинхронной работы)
 DATABASE_URL=sqlite+aiosqlite:///webmaster_bot.db
 
@@ -620,6 +631,7 @@ EOF
 # config.py
 # ============================================================================
 cat > $PROJECT_NAME/config.py <<'EOF'
+
 import os
 import sys
 from pathlib import Path
@@ -636,6 +648,31 @@ if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN == "YOUR_TELEGRAM_BOT_TOKEN":
     print("❌ ОШИБКА: TELEGRAM_BOT_TOKEN не установлен!")
     print("📝 Отредактируйте файл .env и укажите токен от @BotFather")
     sys.exit(1)
+
+# ============================================================================
+# КОНТРОЛЬ ДОСТУПА
+# ============================================================================
+# Список разрешенных пользователей (Telegram ID)
+ALLOWED_USER_IDS_STR = os.getenv("ALLOWED_USER_IDS", "")
+
+if ALLOWED_USER_IDS_STR:
+    try:
+        ALLOWED_USER_IDS = [
+            int(uid.strip()) 
+            for uid in ALLOWED_USER_IDS_STR.split(",") 
+            if uid.strip()
+        ]
+        print(f"✅ Контроль доступа включен: {len(ALLOWED_USER_IDS)} разрешенных пользователей")
+    except ValueError:
+        print("⚠️ ПРЕДУПРЕЖДЕНИЕ: Некорректный формат ALLOWED_USER_IDS в .env")
+        print("   Используйте формат: ALLOWED_USER_IDS=123456789,987654321")
+        ALLOWED_USER_IDS = []
+else:
+    ALLOWED_USER_IDS = []
+    print("⚠️ ПРЕДУПРЕЖДЕНИЕ: ALLOWED_USER_IDS не установлен - доступ открыт для всех!")
+
+# Режим контроля доступа
+ACCESS_CONTROL_ENABLED = bool(ALLOWED_USER_IDS)
 
 # ============================================================================
 # YANDEX WEBMASTER API
@@ -661,9 +698,9 @@ DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///webmaster_bot.db")
 # API настройки
 # ============================================================================
 API_BASE_URL = "https://api.webmaster.yandex.net/v4"
-API_TIMEOUT = 120  # ✅ 2 минуты вместо 30 секунд
-MAX_RETRIES = int(os.getenv("RETRY_ATTEMPTS", "5"))  # ✅ 5 попыток вместо 3
-RETRY_DELAY = int(os.getenv("RETRY_DELAY", "10"))  # ✅ 10 сек вместо 5
+API_TIMEOUT = 120
+MAX_RETRIES = int(os.getenv("RETRY_ATTEMPTS", "5"))
+RETRY_DELAY = int(os.getenv("RETRY_DELAY", "10"))
 
 # ============================================================================
 # Логирование
@@ -731,7 +768,7 @@ EXPORT_FORMATS = ["csv", "xlsx", "json"]
 # ============================================================================
 # Версия
 # ============================================================================
-VERSION = "3.0.0"
+VERSION = "3.1.0"
 BOT_NAME = "Yandex Webmaster Bot"
 
 # ============================================================================
@@ -745,12 +782,128 @@ if __name__ == "__main__":
     print(f"📊 Log Level: {LOG_LEVEL}")
     print(f"📊 Exports Dir: {EXPORTS_DIR}")
     print(f"📊 Admin Users: {len(ADMIN_USER_IDS)}")
+    print(f"🔐 Access Control: {'ENABLED' if ACCESS_CONTROL_ENABLED else 'DISABLED'}")
+    if ACCESS_CONTROL_ENABLED:
+        print(f"🔐 Allowed Users: {len(ALLOWED_USER_IDS)}")
+
+
 EOF
 
+# middleware.py - ГЛАВНЫЙ ФАЙЛ
+# ============================================================================
+cat > $PROJECT_NAME/middleware.py <<'EOF'
+
+"""
+Middleware для контроля доступа к боту по Telegram ID
+"""
+
+from typing import Callable, Dict, Any, Awaitable
+from aiogram import BaseMiddleware
+from aiogram.types import Message, CallbackQuery, TelegramObject
+
+from config import ACCESS_CONTROL_ENABLED, ALLOWED_USER_IDS
+from utils.logger import setup_logger
+
+logger = setup_logger(__name__)
+
+
+class AccessControlMiddleware(BaseMiddleware):
+    """
+    Middleware для проверки доступа пользователей
+    
+    Пропускает только пользователей из списка ALLOWED_USER_IDS,
+    если контроль доступа включен (ACCESS_CONTROL_ENABLED = True)
+    """
+    
+    async def __call__(
+        self,
+        handler: Callable[[TelegramObject, Dict[str, Any]], Awaitable[Any]],
+        event: TelegramObject,
+        data: Dict[str, Any]
+    ) -> Any:
+        
+        # Получаем user_id из события
+        user_id = None
+        
+        if isinstance(event, Message):
+            user_id = event.from_user.id if event.from_user else None
+        elif isinstance(event, CallbackQuery):
+            user_id = event.from_user.id if event.from_user else None
+        
+        # Если не удалось получить user_id, пропускаем
+        if user_id is None:
+            return await handler(event, data)
+        
+        # Если контроль доступа отключен, пропускаем всех
+        if not ACCESS_CONTROL_ENABLED:
+            logger.debug(f"User {user_id}: access granted (access control disabled)")
+            return await handler(event, data)
+        
+        # Проверяем, есть ли пользователь в списке разрешенных
+        if user_id in ALLOWED_USER_IDS:
+            logger.debug(f"User {user_id}: access granted (in whitelist)")
+            return await handler(event, data)
+        
+        # Пользователь не в списке - отклоняем доступ
+        logger.warning(f"⛔ User {user_id} attempted to access bot (NOT IN WHITELIST)")
+        
+        # Отправляем сообщение об отказе в доступе
+        if isinstance(event, Message):
+            await event.answer(
+                "⛔ <b>Доступ запрещен</b>\n\n"
+                "К сожалению, у вас нет доступа к этому боту.\n\n"
+                f"Ваш Telegram ID: <code>{user_id}</code>\n\n"
+                "Если вы считаете, что это ошибка, обратитесь к администратору.",
+                parse_mode="HTML"
+            )
+        elif isinstance(event, CallbackQuery):
+            await event.answer(
+                "⛔ Доступ запрещен. Обратитесь к администратору.",
+                show_alert=True
+            )
+        
+        # Не вызываем handler - блокируем дальнейшую обработку
+        return None
+
+
+class LoggingMiddleware(BaseMiddleware):
+    """
+    Middleware для логирования всех действий пользователей
+    """
+    
+    async def __call__(
+        self,
+        handler: Callable[[TelegramObject, Dict[str, Any]], Awaitable[Any]],
+        event: TelegramObject,
+        data: Dict[str, Any]
+    ) -> Any:
+        
+        # Логируем входящее событие
+        if isinstance(event, Message):
+            user_id = event.from_user.id if event.from_user else "Unknown"
+            username = event.from_user.username if event.from_user else "Unknown"
+            text = event.text[:50] if event.text else "No text"
+            
+            logger.info(f"📨 Message from {user_id} (@{username}): {text}")
+            
+        elif isinstance(event, CallbackQuery):
+            user_id = event.from_user.id if event.from_user else "Unknown"
+            username = event.from_user.username if event.from_user else "Unknown"
+            data_str = event.data[:50] if event.data else "No data"
+            
+            logger.info(f"🔘 Callback from {user_id} (@{username}): {data_str}")
+        
+        # Вызываем handler
+        result = await handler(event, data)
+        
+        return result
+
+EOF
 # ============================================================================
 # bot.py - ГЛАВНЫЙ ФАЙЛ
 # ============================================================================
 cat > $PROJECT_NAME/bot.py <<'EOF'
+
 import asyncio
 import sys
 from pathlib import Path
@@ -763,9 +916,12 @@ from aiogram.fsm.storage.memory import MemoryStorage
 # Настройка путей
 sys.path.insert(0, str(Path(__file__).parent))
 
-from config import TELEGRAM_BOT_TOKEN, VERSION, BOT_NAME
+from config import TELEGRAM_BOT_TOKEN, VERSION, BOT_NAME, ACCESS_CONTROL_ENABLED, ALLOWED_USER_IDS
 from utils.logger import setup_logger
 from database import init_db
+
+# Импорт middleware
+from middleware import AccessControlMiddleware, LoggingMiddleware
 
 # Импорт всех роутеров
 from handlers.start import router as start_router
@@ -801,6 +957,20 @@ async def on_startup(bot: Bot):
         logger.error(f"❌ Failed to get bot info: {e}")
         raise
     
+    # Информация о контроле доступа
+    if ACCESS_CONTROL_ENABLED:
+        logger.info("=" * 60)
+        logger.info("🔐 ACCESS CONTROL ENABLED")
+        logger.info(f"   Allowed users: {len(ALLOWED_USER_IDS)}")
+        logger.info(f"   User IDs: {ALLOWED_USER_IDS}")
+        logger.info("=" * 60)
+    else:
+        logger.warning("=" * 60)
+        logger.warning("⚠️  ACCESS CONTROL DISABLED")
+        logger.warning("   All users can access the bot!")
+        logger.warning("   Set ALLOWED_USER_IDS in .env to enable")
+        logger.warning("=" * 60)
+    
     logger.info("✅ Bot is ready to accept messages")
     logger.info("=" * 60)
 
@@ -828,7 +998,26 @@ async def main():
     
     dp = Dispatcher(storage=MemoryStorage())
     
-    # Регистрация роутеров
+    # ========================================================================
+    # РЕГИСТРАЦИЯ MIDDLEWARE (ВАЖНО: до регистрации роутеров!)
+    # ========================================================================
+    
+    # 1. Middleware для логирования (опционально, но полезно)
+    dp.message.middleware(LoggingMiddleware())
+    dp.callback_query.middleware(LoggingMiddleware())
+    
+    # 2. Middleware для контроля доступа (ГЛАВНОЕ!)
+    dp.message.middleware(AccessControlMiddleware())
+    dp.callback_query.middleware(AccessControlMiddleware())
+    
+    logger.info("✅ Middleware registered:")
+    logger.info("   - LoggingMiddleware")
+    logger.info("   - AccessControlMiddleware")
+    
+    # ========================================================================
+    # РЕГИСТРАЦИЯ РОУТЕРОВ
+    # ========================================================================
+    
     dp.include_router(start_router)
     dp.include_router(hosts_router)
     dp.include_router(export_router)
@@ -863,6 +1052,8 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"\n❌ Fatal error: {e}")
         sys.exit(1)
+
+
 EOF
 
 # ============================================================================
