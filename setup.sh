@@ -77,70 +77,70 @@ openpyxl>=3.1.0
 aiocache>=0.12.2
 EOF
 
-# ============================================================================
-# .gitignore
-# ============================================================================
-cat > $PROJECT_NAME/.gitignore <<'EOF'
-# Environment
-.env
-*.env
-!.env.example
+# # ============================================================================
+# # .gitignore
+# # ============================================================================
+# cat > $PROJECT_NAME/.gitignore <<'EOF'
+# # Environment
+# .env
+# *.env
+# !.env.example
 
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
+# # Python
+# __pycache__/
+# *.py[cod]
+# *$py.class
+# *.so
+# .Python
+# build/
+# develop-eggs/
+# dist/
+# downloads/
+# eggs/
+# .eggs/
+# lib/
+# lib64/
+# parts/
+# sdist/
+# var/
+# wheels/
+# *.egg-info/
+# .installed.cfg
+# *.egg
 
-# Virtual Environment
-venv/
-ENV/
-env/
+# # Virtual Environment
+# venv/
+# ENV/
+# env/
 
-# Database
-*.db
-*.sqlite
-*.sqlite3
+# # Database
+# *.db
+# *.sqlite
+# *.sqlite3
 
-# Logs
-logs/*.log
-*.log
+# # Logs
+# logs/*.log
+# *.log
 
-# Exports
-exports/*.csv
-exports/*.xlsx
-exports/*.json
+# # Exports
+# exports/*.csv
+# exports/*.xlsx
+# exports/*.json
 
-# States
-states/*.json
+# # States
+# states/*.json
 
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
+# # IDE
+# .vscode/
+# .idea/
+# *.swp
+# *.swo
+# *~
 
-# OS
-.DS_Store
-Thumbs.db
-EOF
+# # OS
+# .DS_Store
+# Thumbs.db
+# EOF
 
 # ============================================================================
 # README.md
